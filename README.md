@@ -79,6 +79,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - 钉钉机器人若开启"加签"安全设置，需自行在 webhook_url 上拼接 timestamp/sign 参数
 - `AVAILABILITY` 对所有监控类型生效；`RESPONSE_CODE` 仅对 HTTP 生效
 - **防抖**：`consecutive_failures` 连续 N 次命中才发告警、`consecutive_successes` 连续 M 次正常才发恢复通知（缺省均为 1；可根治网络抖动误报）
+- **失败重试**：通知发送失败后自动后台退避重试（1s/5s/30s/2m/5m 共 5 次），不阻塞监控任务循环；重试成功与最终放弃均有明确日志
 - **THRESHOLD 阈值规则**（系统资源类）示例：
 
 ```json

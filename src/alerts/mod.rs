@@ -367,6 +367,7 @@ impl NotifyEngine {
     }
 
     // 统一的webhook POST：带5秒超时，避免通知渠道故障阻塞监控任务循环
+    // 首次发送失败后转入后台退避重试：告警因网络抖动被静默丢弃的代价太高
     async fn post_webhook(&self, body: serde_json::Value, message: &str, channel: &str) {
         let client = match Client::builder()
             .timeout(Duration::from_secs(5))
@@ -378,26 +379,88 @@ impl NotifyEngine {
                 return;
             }
         };
-        match client
-            .post(&self.notify_config.webhook_url)
-            .json(&body)
-            .send()
-            .await
-        {
+        match Self::try_post(&client, &self.notify_config.webhook_url, &body, channel).await {
+            Ok(()) => {
+                tracing::info!("{}告警发送成功: {}", channel, message);
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "{}告警发送失败: {}（将后台重试{}次，请检查notify_config中的webhook_url是否有效）",
+                    channel,
+                    e,
+                    RETRY_DELAYS_SECS.len()
+                );
+            }
+        }
+        // 后台重试：全部字段克隆进任务，不阻塞监控任务循环；
+        // 重试成功/耗尽都有明确日志，最终失败时告警丢失是显式可见的
+        let url = self.notify_config.webhook_url.clone();
+        let channel = channel.to_string();
+        let message = message.to_string();
+        tokio::spawn(async move {
+            let outcome = retry_with_backoff(
+                |attempt| {
+                    let client = client.clone();
+                    let body = body.clone();
+                    let url = url.clone();
+                    let channel = channel.clone();
+                    async move { Self::try_post(&client, &url, &body, &channel).await.map_err(|e| format!("第{}次重试: {}", attempt + 1, e)) }
+                },
+                &RETRY_DELAYS_SECS,
+            )
+            .await;
+            match outcome {
+                Ok(()) => tracing::info!("{}告警重试成功: {}", channel, message),
+                Err(e) => tracing::error!("{}告警重试全部失败，通知可能丢失: {}（{}）", channel, message, e),
+            }
+        });
+    }
+
+    // 单次webhook发送尝试：2xx视为成功，其余状态码与请求错误均为失败
+    async fn try_post(
+        client: &Client,
+        url: &str,
+        body: &serde_json::Value,
+        channel: &str,
+    ) -> Result<(), String> {
+        match client.post(url).json(body).send().await {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    tracing::info!("{}告警发送成功: {}", channel, message);
+                    Ok(())
                 } else {
-                    tracing::error!("{}告警发送失败，状态码: {}", channel, resp.status());
+                    Err(format!("{}返回状态码 {}", channel, resp.status()))
                 }
             }
-            Err(e) => tracing::error!(
-                "{}告警发送失败: {}（请检查notify_config中的webhook_url是否有效）",
-                channel,
-                e
-            ),
+            Err(e) => Err(format!("请求错误 {}", e)),
         }
     }
+}
+
+// 重试退避策略：失败后1s/5s/30s/2m/5m各重试一次（共5次重试+1次首发）
+const RETRY_DELAYS_SECS: [u64; 5] = [1, 5, 30, 120, 300];
+
+// 通用退避重试循环：对attempt调用至多delays.len()次，每次前等待对应秒数
+// 返回Ok=某次尝试成功；Err=全部耗尽（附带最后一次错误）
+async fn retry_with_backoff<F, Fut>(mut attempt: F, delays: &[u64]) -> Result<(), String>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut last_err = String::from("未执行任何尝试");
+    for (i, &delay) in delays.iter().enumerate() {
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+        }
+        match attempt(i).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!("通知第{}次重试失败: {}", i + 1, e);
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 // 飞书签名算法：以 "{timestamp}\n{secret}" 为HMAC-SHA256密钥，对空消息签名后base64
@@ -768,5 +831,70 @@ mod tests {
             None,
         );
         assert!(engine.evaluate(&cpu_result(99.0)).is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_succeeds_after_transient_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        // 前两次失败、第三次成功：退避循环应停在那个Ok
+        let result = super::retry_with_backoff(
+            move |_| {
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if n < 3 {
+                        Err(format!("fail {n}"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            &[0, 0, 0],
+        )
+        .await;
+        assert!(result.is_ok(), "第3次尝试应成功");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_reports_err_when_exhausted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let result = super::retry_with_backoff(
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async move { Err::<(), String>("down".to_string()) }
+            },
+            &[0, 0],
+        )
+        .await;
+        assert!(result.is_err());
+        // delays长度即重试次数（首发在retry之外）
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_delays_are_strictly_increasing_backoff() {
+        let d = super::RETRY_DELAYS_SECS;
+        assert!(d.windows(2).all(|w| w[0] < w[1]), "退避间隔应严格递增");
+        assert_eq!(d.first(), Some(&1), "首次重试1秒后");
+    }
+
+    #[tokio::test]
+    async fn try_post_fails_on_refused_connection() {
+        use reqwest::Client;
+        use std::time::Duration;
+        // 连接被拒（端口9）时try_post应快速返回Err，且错误信息含上下文
+        let client = Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let body = serde_json::json!({"msg_type": "text", "content": {"text": "t"}});
+        // try_post定义在NotifyEngine（通知发送器）上
+        let r = super::NotifyEngine::try_post(&client, "http://127.0.0.1:9/hook", &body, "飞书").await;
+        let err = r.expect_err("端口9应连接失败");
+        assert!(err.contains("请求错误"), "错误应标注来源: {err}");
     }
 }
