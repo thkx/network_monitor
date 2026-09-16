@@ -237,7 +237,12 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     }
 }
 
-// 持续接收各监控任务的结果：更新指标、写CSV、持久化数据库
+// 消费者攒批参数：满64条、或首个待写结果等待超过1秒，即批量落库
+// （监控间隔普遍≥5秒，1秒的入库延迟对状态展示无感；换取写锁次数降为批次级）
+const BATCH_MAX_ITEMS: usize = 64;
+const BATCH_FLUSH_MILLIS: u64 = 1000;
+
+// 持续接收各监控任务的结果：更新指标、写CSV、攒批持久化数据库
 // 共享通道 + 单一消费者：所有监控任务的结果在此顺序处理，互不阻塞
 // 告警检查已下沉到各监控任务内部，由任务独占引擎与抑制状态
 async fn consume_results(
@@ -246,34 +251,88 @@ async fn consume_results(
     metrics: Arc<Mutex<MetricsRegistry>>,
 ) {
     let logger = CsvLogger::new("monitor_log.csv");
-    while let Some(message) = rx.recv().await {
-        // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
-        {
-            let (status, response_time, _code) = log_fields(&message.result);
-            let response_time_ms = u64::try_from(response_time).unwrap_or(u64::MAX);
-            metrics
-                .lock()
-                .expect("metrics锁中毒")
-                .record(
-                    &message.route,
-                    &message.result.monitor_type.to_string(),
-                    status,
-                    response_time_ms,
-                );
-        }
-        log_result(&logger, &message.route.name, &message.result);
-        // 结果持久化到check_result表
-        if let Some(monitor_id) = message.route.monitor_id {
-            persist_result(&result_service, monitor_id, &message.result);
+    let mut buffer: Vec<MonitorResultMessage> = Vec::with_capacity(BATCH_MAX_ITEMS);
+    let mut flush_tick =
+        tokio::time::interval(std::time::Duration::from_millis(BATCH_FLUSH_MILLIS));
+    flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            message = rx.recv() => {
+                let Some(message) = message else {
+                    // 所有发送端关闭（进程退出路径）：清空余量后结束
+                    flush_batch(&result_service, &mut buffer);
+                    break;
+                };
+                // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
+                {
+                    let (status, response_time, _code) = log_fields(&message.result);
+                    let response_time_ms = u64::try_from(response_time).unwrap_or(u64::MAX);
+                    metrics
+                        .lock()
+                        .expect("metrics锁中毒")
+                        .record(
+                            &message.route,
+                            &message.result.monitor_type.to_string(),
+                            status,
+                            response_time_ms,
+                        );
+                }
+                log_result(&logger, &message.route.name, &message.result);
+                // 数据库持久化走攒批；无主键的结果（Once/Monitor模式）本就不入库
+                if message.route.monitor_id.is_some() {
+                    buffer.push(message);
+                    if buffer.len() >= BATCH_MAX_ITEMS {
+                        flush_batch(&result_service, &mut buffer);
+                    }
+                }
+            }
+            _ = flush_tick.tick() => {
+                flush_batch(&result_service, &mut buffer);
+            }
         }
     }
 }
 
-// 把监控结果持久化到check_result表
+// 把攒批的检查结果一次性落库（多行INSERT）；批量失败降级为逐条写入保数据
+fn flush_batch(result_service: &ResultService, buffer: &mut Vec<MonitorResultMessage>) {
+    if buffer.is_empty() {
+        return;
+    }
+    let inserts: Vec<CheckResultModelInsert> = buffer
+        .drain(..)
+        .map(|m| build_check_insert(m.route.monitor_id.unwrap_or_default(), &m.result))
+        .collect();
+    match result_service.save_check_results_batch(&inserts) {
+        Ok(n) => tracing::debug!("批量持久化 {} 条监控结果（{}行）", inserts.len(), n),
+        Err(e) => {
+            // 降级逐条写入：定位问题行，其余数据不丢（CSV日志另有完整备份）
+            tracing::error!("批量持久化失败({})，降级逐条写入: {} 条", e, inserts.len());
+            for insert in &inserts {
+                if let Err(e) = result_service.save_check_result(insert) {
+                    tracing::error!(
+                        "单条持久化失败 (monitor_id={}): {}",
+                        insert.monitor_id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
+// 把监控结果持久化到check_result表（手动执行接口用：立即单条落库）
 // metadata_json = {"check_id": "<hex>", "details": {...}}：检查ID一并入库，
 // CSV日志里的check_id即可关联到这条记录（此前两者无法对应）
 // pub(crate)：/api/monitors/{id}/run 手动执行后复用同一持久化逻辑
 pub(crate) fn persist_result(result_service: &ResultService, monitor_id: i32, result: &CheckResult) {
+    let insert = build_check_insert(monitor_id, result);
+    if let Err(e) = result_service.save_check_result(&insert) {
+        tracing::error!("监控结果持久化失败 (monitor_id={}): {}", monitor_id, e);
+    }
+}
+
+// 从检查结果构造入库行（单条与批量持久化共用同一字段构造）
+fn build_check_insert(monitor_id: i32, result: &CheckResult) -> CheckResultModelInsert {
     let (status, response_time, _status_code) = log_fields(result);
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -283,15 +342,12 @@ pub(crate) fn persist_result(result_service: &ResultService, monitor_id: i32, re
     if let Ok(details) = serde_json::to_value(&result.details) {
         metadata.insert("details".to_string(), details);
     }
-    let metadata_json = serde_json::to_string(&serde_json::Value::Object(metadata)).ok();
-    if let Err(e) = result_service.save_check_result(&CheckResultModelInsert {
+    CheckResultModelInsert {
         monitor_id,
         monitor_type: result.monitor_type.to_string(),
         status: if status { 1 } else { 0 },
         response_time: response_time.min(i32::MAX as u128) as i32,
-        metadata_json,
-    }) {
-        tracing::error!("监控结果持久化失败 (monitor_id={}): {}", monitor_id, e);
+        metadata_json: serde_json::to_string(&serde_json::Value::Object(metadata)).ok(),
     }
 }
 

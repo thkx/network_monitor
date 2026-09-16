@@ -30,6 +30,14 @@ impl ResultService {
         self.repo.get_check_results(monitor_id, page, page_size)
     }
 
+    // 批量保存监控结果（单条多行INSERT，消费者攒批后调用）
+    pub fn save_check_results_batch(
+        &self,
+        inserts: &[CheckResultModelInsert],
+    ) -> Result<usize, Error> {
+        self.repo.insert_check_results_batch(inserts)
+    }
+
     // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
     pub fn get_latest_by_monitor(&self) -> Result<Vec<CheckResultModel>, Error> {
         self.repo.get_latest_by_monitor()

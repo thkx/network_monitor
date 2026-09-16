@@ -33,6 +33,21 @@ impl CheckResultRepository {
             .execute(&mut conn)
     }
 
+    // 批量插入多条监控结果：单条多行INSERT语句
+    // （高监控数时每秒数百次独立小事务会加剧写锁竞争，合并后锁次数降为批次级）
+    pub fn insert_check_results_batch(
+        &self,
+        inserts: &[CheckResultModelInsert],
+    ) -> Result<usize, diesel::result::Error> {
+        if inserts.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = get_connection(&self.pool);
+        diesel::insert_into(check_result::table)
+            .values(inserts)
+            .execute(&mut conn)
+    }
+
     // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
     // 两段式类型安全查询：先取各monitor_id的最大结果id，再取回这些行
     pub fn get_latest_by_monitor(&self) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
@@ -128,5 +143,30 @@ mod tests {
         // 负数天数表示截止时间在未来，全部清理
         assert_eq!(repo.delete_older_than_days(-1).unwrap(), 1);
         assert_eq!(repo.get_check_results(None, 1, 10).unwrap().1, 0);
+    }
+
+    #[test]
+    fn batch_insert_roundtrip_and_empty_noop() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_id = create_monitor(&pool);
+        let repo = CheckResultRepository::new(pool);
+        let inserts: Vec<CheckResultModelInsert> = (1..=3)
+            .map(|i| CheckResultModelInsert {
+                monitor_id,
+                monitor_type: "HTTP".to_string(),
+                status: 1,
+                response_time: i * 10,
+                metadata_json: None,
+            })
+            .collect();
+        // 批量插入3条，一次调用全部落库
+        assert_eq!(repo.insert_check_results_batch(&inserts).unwrap(), 3);
+        let (list, total) = repo.get_check_results(Some(monitor_id), 1, 10).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(list[0].response_time, 30, "最新一条在前");
+        assert_eq!(list[2].response_time, 10);
+        // 空批次为no-op
+        assert_eq!(repo.insert_check_results_batch(&[]).unwrap(), 0);
     }
 }
