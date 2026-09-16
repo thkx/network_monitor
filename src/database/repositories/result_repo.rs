@@ -33,6 +33,20 @@ impl CheckResultRepository {
             .execute(&mut conn)
     }
 
+    // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
+    // 两段式类型安全查询：先取各monitor_id的最大结果id，再取回这些行
+    pub fn get_latest_by_monitor(&self) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
+        let mut conn = get_connection(&self.pool);
+        let max_ids: Vec<Option<i32>> = check_result::table
+            .group_by(check_result::monitor_id)
+            .select(diesel::dsl::max(check_result::id))
+            .load(&mut conn)?;
+        let ids: Vec<i32> = max_ids.into_iter().flatten().collect();
+        check_result::table
+            .filter(check_result::id.eq_any(ids))
+            .load::<CheckResultModel>(&mut conn)
+    }
+
     // 分页查询监控结果（monitor_id为None时查询全部）
     pub fn get_check_results(
         &self,

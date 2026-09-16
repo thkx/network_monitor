@@ -257,7 +257,8 @@ async fn consume_results(
 // 把监控结果持久化到check_result表
 // metadata_json = {"check_id": "<hex>", "details": {...}}：检查ID一并入库，
 // CSV日志里的check_id即可关联到这条记录（此前两者无法对应）
-fn persist_result(result_service: &ResultService, monitor_id: i32, result: &CheckResult) {
+// pub(crate)：/api/monitors/{id}/run 手动执行后复用同一持久化逻辑
+pub(crate) fn persist_result(result_service: &ResultService, monitor_id: i32, result: &CheckResult) {
     let (status, response_time, _status_code) = log_fields(result);
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -307,7 +308,11 @@ fn display_name(entry: &SelfDefineMonitorConfig) -> String {
 
 // 根据JSON配置项构建监控任务配置
 // default_interval：配置项未指定interval时使用的默认监控间隔（来自命令行参数）
-fn build_monitor_config(entry: &SelfDefineMonitorConfig, default_interval: u64) -> MonitorConfig {
+// pub(crate)：/api/monitors/{id}/run 手动执行时复用同一构建逻辑
+pub(crate) fn build_monitor_config(
+    entry: &SelfDefineMonitorConfig,
+    default_interval: u64,
+) -> MonitorConfig {
     let monitor_type = entry.monitor_type;
     // 按监控类型构建各自的详情参数
     let details = match monitor_type {
@@ -474,7 +479,8 @@ fn log_result(logger: &CsvLogger, name: &str, result: &CheckResult) {
 }
 
 // 把不同监控类型的结果统一转换为日志记录所需的字段 (状态, 耗时ms, 状态码)
-fn log_fields(result: &CheckResult) -> (bool, u128, Option<u16>) {
+// pub(crate)：控制台的status聚合与手动执行接口复用同一字段提取逻辑
+pub(crate) fn log_fields(result: &CheckResult) -> (bool, u128, Option<u16>) {
     match &result.details {
         CheckResultDetail::Http(r) => (
             r.basic_avaliable.is_reachable,

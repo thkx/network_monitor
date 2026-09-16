@@ -1,11 +1,18 @@
 use actix_web::{web, HttpResponse};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
+use crate::async_monitor::{AsyncMonitor, ResultRoute};
+use crate::database::connect_db::SqlitePool;
+use crate::database::models::{CheckResultModel, MonitorConfigInsert, MonitorConfigUpdate};
+use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::database::services::monitor_service::MonitorService;
+use crate::database::services::result_service::ResultService;
 use crate::database::services::{build_monitor_insert};
+use crate::metrics::MetricsRegistry;
+use crate::monitor::MonitorFactory;
 use crate::scheduler::Scheduler;
 use crate::tools_types::{
     AlertRuleTypes, ContentVerificationRules, SelfDefineMonitorConfig,
@@ -279,6 +286,132 @@ fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Err
     Ok(())
 }
 
+// 控制台聚合视图：监控配置 + 各自最新一次检查结果 + 告警抑制状态
+// 一次请求拿齐列表页所需全部数据，前端无需逐个监控再查结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MonitorStatusItem {
+    pub id: i32,
+    pub name: String,
+    pub target: String,
+    pub monitor_type: String,
+    pub enabled: i32,
+    pub last_status: Option<i32>,      // None=尚未执行过检查
+    pub last_response_time: Option<i32>,
+    pub last_check_at: Option<String>,
+    pub alerting: bool,                // 是否处于"已告警未恢复"状态
+}
+
+// GET /api/status
+pub async fn get_console_status(
+    monitor_service: web::Data<MonitorService>,
+    result_service: web::Data<ResultService>,
+    pool: web::Data<Arc<SqlitePool>>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let (monitors, _total) = monitor_service
+        .get_monitors_paged(1, 1000)
+        .map_err(internal_error)?;
+    let latest: Vec<CheckResultModel> = result_service
+        .get_latest_by_monitor()
+        .map_err(internal_error)?;
+    let latest_map: HashMap<i32, &CheckResultModel> =
+        latest.iter().map(|r| (r.monitor_id, r)).collect();
+    // 查库失败降级为空快照：状态页仍可展示，只是alerting全为false
+    let alert_map: HashMap<i32, bool> = AlertStateRepository::new(pool.get_ref().clone())
+        .get_all_alerting()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let items: Vec<MonitorStatusItem> = monitors
+        .iter()
+        .map(|m| {
+            let l = latest_map.get(&m.id);
+            MonitorStatusItem {
+                id: m.id,
+                name: m.name.clone().unwrap_or_else(|| m.target.clone()),
+                target: m.target.clone(),
+                monitor_type: m.monitor_type.clone(),
+                enabled: m.enabled,
+                last_status: l.map(|r| r.status),
+                last_response_time: l.map(|r| r.response_time),
+                last_check_at: l.and_then(|r| {
+                    r.created_at
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                }),
+                alerting: alert_map.get(&m.id).copied().unwrap_or(false),
+            }
+        })
+        .collect();
+    Ok(HttpResponse::Ok().json(DefaultResponseObj {
+        code: 200,
+        message: "OK".to_string(),
+        data: items,
+    }))
+}
+
+// POST /api/monitors/{id}/run：立即手动执行一次检查并返回结果
+// 结果照常走指标更新与数据库持久化，与定时任务同一条链路
+pub async fn run_monitor_once(
+    path: web::Path<i32>,
+    monitor_service: web::Data<MonitorService>,
+    result_service: web::Data<ResultService>,
+    metrics: web::Data<Arc<Mutex<MetricsRegistry>>>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let id = path.into_inner();
+    let row = monitor_service
+        .get_monitor_by_id(id)
+        .map_err(internal_error)?
+        .ok_or_else(|| actix_web::error::ErrorNotFound(format!("监控 {} 不存在", id)))?;
+    let config_json = row
+        .config_json
+        .clone()
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("监控缺少config_json，无法执行"))?;
+    let entry: SelfDefineMonitorConfig = serde_json::from_str(&config_json)
+        .map_err(|e| {
+            actix_web::error::ErrorInternalServerError(format!("配置解析失败: {}", e))
+        })?;
+    let name = row
+        .name
+        .clone()
+        .unwrap_or_else(|| crate::display_name(&entry));
+    let config = crate::build_monitor_config(&entry, 5);
+    let monitor = MonitorFactory::create_monitor(config.monitor_type);
+    // 单次执行：复用Once模式的执行封装，结果完整返回给前端
+    let mut rx = AsyncMonitor::create_once_monitoring(monitor, config).await;
+    let Some(result) = rx.recv().await else {
+        return Err(actix_web::error::ErrorInternalServerError(
+            "监控执行未返回结果",
+        ));
+    };
+    // 指标与持久化与主消费循环同源，手动执行不影响数据一致性
+    {
+        let (status, response_time, _code) = crate::log_fields(&result);
+        metrics.lock().expect("metrics锁中毒").record(
+            &ResultRoute {
+                name: name.clone(),
+                monitor_id: Some(id),
+            },
+            &result.monitor_type.to_string(),
+            status,
+            u64::try_from(response_time).unwrap_or(u64::MAX),
+        );
+    }
+    crate::persist_result(&result_service, id, &result);
+    let (status, response_time, status_code) = crate::log_fields(&result);
+    let detail_json = serde_json::to_value(&result.details).ok();
+    Ok(HttpResponse::Ok().json(DefaultResponseObj {
+        code: 200,
+        message: "OK".to_string(),
+        data: serde_json::json!({
+            "check_id": format!("{:x}", result.id),
+            "monitor": name,
+            "status": status,
+            "response_time": response_time,
+            "status_code": status_code,
+            "details": detail_json,
+        }),
+    }))
+}
+
 // 统一500错误转换
 fn internal_error(e: diesel::result::Error) -> actix_web::Error {
     actix_web::error::ErrorInternalServerError(format!("Database error: {}", e))
@@ -384,5 +517,86 @@ mod tests {
             r#"{"target":"x","monitor_type":"CPU","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[{"rule_type":"THRESHOLD","condition":{"threshold":{"metric":"cpu","op":">=","value":80}}}]}}"#,
         );
         assert!(validate_config(&good).is_ok());
+    }
+
+    // 控制台两个新端点的端到端测试：临时库 + 内存App
+    // 手动执行选CPU类型监控：无网络依赖，结果稳定可用
+    #[actix_web::test]
+    async fn console_status_and_manual_run_roundtrip() {
+        use super::{DefaultResponseObj, MonitorStatusItem, get_console_status, run_monitor_once};
+        use actix_web::web;
+        use crate::database::connect_db::test_pool;
+        use crate::database::models::MonitorConfigInsert;
+        use crate::database::repositories::monitor_repo::MonitorRepository;
+        use crate::database::repositories::result_repo::CheckResultRepository;
+        use crate::database::services::monitor_service::MonitorService;
+        use crate::database::services::result_service::ResultService;
+        use crate::metrics::MetricsRegistry;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        let result_service = ResultService::new(CheckResultRepository::new(pool.clone()));
+        let metrics = Arc::new(Mutex::new(MetricsRegistry::new()));
+
+        let insert = MonitorConfigInsert {
+            name: Some("t-cpu".to_string()),
+            target: "cpu://local".to_string(),
+            method: None,
+            monitor_type: "CPU".to_string(),
+            interval_ms: Some(5),
+            timeout_ms: 5000,
+            config_json: Some(r#"{"monitor_type":"CPU","timeout":5}"#.to_string()),
+            enabled: 1,
+            tag: None,
+        };
+        let created = monitor_service.create_monitor(&insert).unwrap();
+
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(monitor_service.clone()))
+                .app_data(web::Data::new(result_service.clone()))
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(metrics.clone()))
+                .route("/api/status", web::get().to(get_console_status))
+                .route(
+                    "/api/monitors/{id}/run",
+                    web::post().to(run_monitor_once),
+                ),
+        )
+        .await;
+
+        // 手动执行：200 + 可用 + 详情返回
+        let req = actix_web::test::TestRequest::post()
+            .uri(&format!("/api/monitors/{}/run", created.id))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "手动执行应成功");
+        let body: DefaultResponseObj<serde_json::Value> =
+            actix_web::test::read_body_json(resp).await;
+        assert_eq!(body.data["status"], true);
+        assert!(body.data["details"].is_object());
+
+        // status聚合：最新结果已落库可见
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/status")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: DefaultResponseObj<Vec<MonitorStatusItem>> =
+            actix_web::test::read_body_json(resp).await;
+        assert_eq!(body.data.len(), 1);
+        assert_eq!(body.data[0].id, created.id);
+        assert_eq!(body.data[0].last_status, Some(1), "最新结果应为可用");
+        assert!(body.data[0].last_check_at.is_some());
+        assert!(!body.data[0].alerting);
+
+        // 手动执行不存在的监控：404
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/monitors/99999/run")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404);
     }
 }

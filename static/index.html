@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>网络监控器 · 控制台</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2129; --border: #2a3542; --text: #d8e1ea;
+    --muted: #7d8b99; --ok: #3fb950; --fail: #f85149; --warn: #d29922;
+    --accent: #58a6ff; --hover: #212b36;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; padding: 24px; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; }
+  .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: var(--hover); border-color: var(--accent); }
+  button.primary { background: #1f4a70; border-color: #2a5a8a; }
+  button.danger:hover { border-color: var(--fail); color: var(--fail); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; background: #161d25; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--hover); }
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 12px; }
+  .ok    { background: #12351c; color: var(--ok); }
+  .fail  { background: #3d1618; color: var(--fail); }
+  .na    { background: #2a3542; color: var(--muted); }
+  .alert { background: #3d2d0f; color: var(--warn); }
+  .muted { color: var(--muted); }
+  .actions button { padding: 2px 8px; font-size: 12px; margin-right: 4px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-top: 18px; }
+  .card h2 { font-size: 15px; margin-bottom: 10px; }
+  textarea {
+    width: 100%; min-height: 180px; background: #0d1117; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+    font: 12px/1.5 Consolas, monospace; resize: vertical;
+  }
+  .err { color: var(--fail); white-space: pre-wrap; margin-top: 8px; font-size: 12px; }
+  .hidden { display: none; }
+  #resultOut { margin-top: 10px; font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; color: var(--muted); max-height: 300px; overflow: auto; }
+  #runOut { margin-top: 10px; font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; }
+  details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>网络监控器 · 控制台</h1>
+  <div class="sub">采集 → 告警 → 指标：/metrics 为 Prometheus 端点；本页数据 5 秒自动刷新</div>
+
+  <div class="bar">
+    <label><input type="checkbox" id="autoRefresh" checked> 自动刷新（5s）</label>
+    <button onclick="refresh(true)">手动刷新</button>
+    <button onclick="togglePanel('newPanel')">＋ 新建监控</button>
+    <span id="updated" class="muted"></span>
+  </div>
+
+  <table id="statusTable">
+    <thead>
+      <tr>
+        <th>状态</th><th>名称</th><th>类型</th><th>目标</th>
+        <th>耗时</th><th>最近检查</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div id="newPanel" class="card hidden">
+    <h2>新建监控（SelfDefineMonitorConfig JSON）</h2>
+    <details open><summary>示例：HTTP 监控 + 可用性告警（点击折叠）</summary>
+      <div id="example" style="color:var(--muted);font:12px Consolas,monospace;white-space:pre-wrap;margin:6px 0;"></div>
+    </details>
+    <textarea id="newJson" spellcheck="false"></textarea>
+    <div class="bar" style="margin-top:10px">
+      <button class="primary" onclick="createMonitor()">提交创建</button>
+      <span class="muted">alert_rules 可省略；consecutive_failures/successes 为防抖参数</span>
+    </div>
+    <div id="newErr" class="err"></div>
+  </div>
+
+  <div id="resultsPanel" class="card hidden">
+    <h2 id="resultsTitle">检查结果</h2>
+    <div id="resultOut"></div>
+  </div>
+
+  <div id="runPanel" class="card hidden">
+    <h2 id="runTitle">手动执行结果</h2>
+    <div id="runOut"></div>
+  </div>
+</div>
+
+<script>
+const API = {
+  status:   '/api/status',
+  run:   id => `/api/monitors/${id}/run`,
+  toggle:   id => `/api/monitors/${id}/enabled`,
+  del:      id => `/api/monitors/${id}`,
+  results:  id => `/api/results?monitor_id=${id}&page_no=1&page_size=15`,
+};
+
+const EXAMPLE = {
+  target: 'https://example.com', monitor_type: 'HTTP', interval: 60,
+  alert_rules: {
+    notify_type: 'FEISHU',
+    notify_config: { webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' },
+    rules: [{ rule_type: 'AVAILABILITY', condition: {} }],
+    consecutive_failures: 3, consecutive_successes: 2,
+  },
+};
+document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+document.getElementById('newJson').value = JSON.stringify(EXAMPLE, null, 2);
+
+async function refresh(notify) {
+  try {
+    const r = await fetch(API.status);
+    const j = await r.json();
+    if (j.code !== 200) throw new Error(j.message);
+    render(j.data);
+    if (notify) toast('已刷新');
+  } catch (e) { toast('加载失败: ' + e.message, true); }
+}
+
+function render(items) {
+  const tb = document.querySelector('#statusTable tbody');
+  tb.innerHTML = '';
+  for (const m of items) {
+    const tr = document.createElement('tr');
+    let badge = '<span class="badge na">未检查</span>';
+    if (m.last_status === 1) badge = '<span class="badge ok">可用</span>';
+    if (m.last_status === 0) badge = '<span class="badge fail">不可用</span>';
+    if (m.enabled === 0) badge += ' <span class="badge na">已停用</span>';
+    if (m.alerting) badge += ' <span class="badge alert">告警中</span>';
+    tr.innerHTML = `
+      <td>${badge}</td>
+      <td>${esc(m.name)}</td>
+      <td><span class="muted">${esc(m.monitor_type)}</span></td>
+      <td class="muted">${esc(m.target)}</td>
+      <td>${m.last_response_time != null ? m.last_response_time + ' ms' : '—'}</td>
+      <td class="muted">${m.last_check_at || '—'}</td>
+      <td class="actions">
+        <button onclick="runOnce(${m.id})">▶ 运行</button>
+        <button onclick="showResults(${m.id}, '${esc(m.name)}')">📋 结果</button>
+        <button onclick="toggle(${m.id}, ${m.enabled})">${m.enabled === 1 ? '⏸ 停用' : '▶ 启用'}</button>
+        <button class="danger" onclick="removeMonitor(${m.id})">🗑</button>
+      </td>`;
+    tb.appendChild(tr);
+  }
+  document.getElementById('updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
+}
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function togglePanel(id) { document.getElementById(id).classList.toggle('hidden'); }
+
+async function createMonitor() {
+  const errBox = document.getElementById('newErr');
+  errBox.textContent = '';
+  try {
+    const body = JSON.parse(document.getElementById('newJson').value);
+    const r = await fetch('/api/monitors', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) { errBox.textContent = `HTTP ${r.status}\n` + JSON.stringify(j, null, 2); return; }
+    toast('创建成功');
+    document.getElementById('newPanel').classList.add('hidden');
+    refresh(false);
+  } catch (e) { errBox.textContent = 'JSON 解析失败: ' + e.message; }
+}
+
+async function runOnce(id) {
+  const panel = document.getElementById('runPanel');
+  const out = document.getElementById('runOut');
+  document.getElementById('runTitle').textContent = `手动执行结果（monitor_id=${id}）`;
+  panel.classList.remove('hidden');
+  out.textContent = '执行中…';
+  try {
+    const r = await fetch(API.run(id), { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) { out.textContent = `HTTP ${r.status}: ${JSON.stringify(j)}`; return; }
+    const d = j.data;
+    out.style.color = d.status ? 'var(--ok)' : 'var(--fail)';
+    out.textContent =
+      `${d.status ? '✔ 可用' : '✘ 不可用'}  ${d.response_time} ms` +
+      (d.status_code != null ? `  状态码 ${d.status_code}` : '') +
+      `\ncheck_id: ${d.check_id}\n\n` + JSON.stringify(d.details, null, 2);
+    refresh(false);
+  } catch (e) { out.style.color = 'var(--fail)'; out.textContent = '执行失败: ' + e.message; }
+}
+
+async function showResults(id, name) {
+  const panel = document.getElementById('resultsPanel');
+  const out = document.getElementById('resultOut');
+  document.getElementById('resultsTitle').textContent = `检查结果 — ${name}`;
+  panel.classList.remove('hidden');
+  try {
+    const r = await fetch(API.results(id));
+    const j = await r.json();
+    if (j.code !== 200) throw new Error(j.message);
+    out.textContent = j.data.list.length === 0
+      ? '（暂无结果）'
+      : j.data.list.map(x =>
+          `#${x.id}  ${x.status === 1 ? '✔' : '✘'}  ${x.response_time} ms  ${x.created_at || ''}`
+        ).join('\n') + `\n\n共 ${j.data.total} 条（显示最近 ${j.data.list.length} 条）`;
+  } catch (e) { out.textContent = '加载失败: ' + e.message; }
+}
+
+async function toggle(id, enabled) {
+  await fetch(API.toggle(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !(enabled === 1) }) });
+  refresh(false);
+}
+
+async function removeMonitor(id) {
+  if (!confirm(`确认删除监控 ${id}？其历史结果与告警状态将一并清除。`)) return;
+  await fetch(API.del(id), { method: 'DELETE' });
+  refresh(false);
+}
+
+function toast(msg, isErr) {
+  const el = document.getElementById('updated');
+  el.textContent = msg;
+  el.style.color = isErr ? 'var(--fail)' : '';
+  setTimeout(() => { el.style.color = ''; refresh(false); }, isErr ? 2500 : 0);
+}
+
+setInterval(() => { if (document.getElementById('autoRefresh').checked) refresh(false); }, 5000);
+refresh(false);
+</script>
+</body>
+</html>

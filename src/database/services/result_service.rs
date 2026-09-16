@@ -30,6 +30,11 @@ impl ResultService {
         self.repo.get_check_results(monitor_id, page, page_size)
     }
 
+    // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
+    pub fn get_latest_by_monitor(&self) -> Result<Vec<CheckResultModel>, Error> {
+        self.repo.get_latest_by_monitor()
+    }
+
     // 清理 N 天前的过期监控结果（数据保留策略）
     pub fn delete_expired(&self, days: i64) -> Result<usize, Error> {
         self.repo.delete_older_than_days(days)
