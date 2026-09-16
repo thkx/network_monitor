@@ -22,14 +22,17 @@ pub struct Scheduler {
     tx: Option<mpsc::Sender<MonitorResultMessage>>,
     // 连接池：用于构造告警状态仓库（抑制状态持久化到 alert_state 表）
     pool: Arc<SqlitePool>,
+    // 默认监控间隔（秒）：配置项未指定interval时使用（--interval，与Once/Monitor模式同源）
+    default_interval: u64,
 }
 
 impl Scheduler {
-    pub fn new(pool: Arc<SqlitePool>) -> Self {
+    pub fn new(pool: Arc<SqlitePool>, default_interval: u64) -> Self {
         Scheduler {
             tasks: HashMap::new(),
             tx: None,
             pool,
+            default_interval,
         }
     }
 
@@ -98,7 +101,7 @@ impl Scheduler {
             );
         }
         let name = row.name.clone().unwrap_or_else(|| display_name(&entry));
-        let config = MonitorConfig::from_entry(&entry, 5);
+        let config = MonitorConfig::from_entry(&entry, self.default_interval);
         let monitor = MonitorFactory::create_monitor(config.monitor_type);
         // 告警引擎与任务同生命周期；抑制状态从 alert_state 表恢复：
         // 热更新重建任务后引擎不会"失忆"，故障未恢复就不会重复轰炸通知渠道

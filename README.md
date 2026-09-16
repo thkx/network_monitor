@@ -8,7 +8,8 @@
 - **三种运行模式**：
   - `once` — 对 monitor_list.json 中的配置各执行一次探测
   - `monitor --interval N` — 按 N 秒间隔持续探测（无持久化）
-  - `server --port N` — 完整闭环：持久化 + 调度 + 告警 + Web API
+  - `server --port N --interval N` — 完整闭环：持久化 + 调度 + 告警 + Web API
+    （`--interval` 为未配置 interval 的监控项的默认间隔，秒，缺省 5；调度任务与手动执行共用）
 - **Web API**：监控配置 CRUD、分页筛选、启用/禁用（PATCH）、结果查询，配置变更热更新（无需重启）
 - **告警体系**：
   - `AVAILABILITY` 通用可用性规则（全部监控类型生效）、`RESPONSE_CODE` 响应码规则（仅 HTTP）
@@ -214,7 +215,7 @@ cargo build         # 构建
 
 ```
 src/
-├── main.rs              # 入口：三种运行模式 + build_monitor_config 等核心组装逻辑
+├── main.rs              # 入口：三种运行模式 + 结果消费/攒批落库等组装逻辑
 ├── args.rs              # clap 命令行定义（once/monitor/server）
 ├── logging.rs           # tracing 初始化（控制台 + 按日滚动文件双通道）
 ├── scheduler.rs         # Server模式调度器（任务句柄管理、热更新重建）

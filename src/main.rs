@@ -130,9 +130,9 @@ async fn main() {
                 log_result(&logger, &message.route.name, &message.result);
             }
         }
-        Commands::Server { port } => {
+        Commands::Server { port, interval } => {
             // Server模式：数据持久化 + 调度监控 + 告警 + Web API 的功能闭环
-            run_server(port, monitor_list).await;
+            run_server(port, interval, monitor_list).await;
         }
     }
 }
@@ -140,7 +140,9 @@ async fn main() {
 // Server命令入口：
 // 1.建立数据库连接 2.导入monitor_list.json 3.从数据库加载配置并调度监控
 // 4.后台消费监控结果（CSV日志+数据库持久化+告警） 5.启动Web API服务
-async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
+// default_interval：配置项未指定interval时的默认监控间隔（--interval，秒），
+// 调度任务与手动执行接口共用同一来源（此前两处各自写死5，且Server模式无法配置）
+async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefineMonitorConfig>) {
     // 1. 建立数据库连接（带重试，自动执行迁移建表）
     let pool = match establish_database_connection().await {
         Ok(pool) => pool,
@@ -186,7 +188,7 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     });
 
     // 4. 调度器加载启用配置并启动定时监控；API 增删改配置后可整体重建实现热更新
-    let mut scheduler = Scheduler::new(pool.clone());
+    let mut scheduler = Scheduler::new(pool.clone(), default_interval);
     scheduler.set_sender(tx);
     scheduler.reload_all(&monitor_service);
     let scheduler = web::Data::new(Arc::new(Mutex::new(scheduler)));
@@ -208,7 +210,8 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
             .app_data(web::Data::new(result_service.clone()))
             .app_data(web::Data::new(metrics_for_app.clone()))
             .app_data(web::Data::new(pool_for_app.clone()))
-            .app_data(scheduler.clone())
+            .app_data(web::Data::new(scheduler.clone()))
+            .app_data(web::Data::new(default_interval))
             .app_data(web::Data::new(session_store.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .wrap(Auth::new(session_store.clone(), auth_config.clone()))

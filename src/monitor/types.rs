@@ -6,9 +6,9 @@ use crate::tools_types::{
     HttpBody, HttpBodyConfig, HttpMethodTypes, HttpMonitorResult, MonitorType,
     SelfDefineMonitorConfig,
 };
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
 // 内容验证规则结构体，全局统一定义在 tools_types 中，这里直接重导出使用
 pub use crate::tools_types::ContentVerificationRulesSingle;
@@ -75,16 +75,12 @@ impl MonitorConfig {
                     match body_cfg {
                         HttpBodyConfig::Text { content } => {
                             if !has_content_type {
-                                header_map.insert(
-                                    CONTENT_TYPE,
-                                    HeaderValue::from_static("text/plain"),
-                                );
+                                header_map
+                                    .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
                             }
                             Some(HttpBody::Text(content.clone()))
                         }
-                        HttpBodyConfig::Json { content } => {
-                            Some(HttpBody::Json(content.clone()))
-                        }
+                        HttpBodyConfig::Json { content } => Some(HttpBody::Json(content.clone())),
                         HttpBodyConfig::Binary { content } => {
                             // binary的content为base64编码，解码失败时忽略该body并告警
                             match BASE64_STANDARD.decode(content.as_bytes()) {
@@ -139,9 +135,7 @@ impl MonitorConfig {
             MonitorType::Udp => MonitorConfigDetail::Udp(UdpMonitorConfig {}),
             MonitorType::Dns => MonitorConfigDetail::Dns(DnsMonitorConfig {}),
             MonitorType::Ftp => MonitorConfigDetail::Ftp(FtpMonitorConfig {}),
-            MonitorType::Traceroute => {
-                MonitorConfigDetail::Traceroute(TracerouteMonitorConfig {})
-            }
+            MonitorType::Traceroute => MonitorConfigDetail::Traceroute(TracerouteMonitorConfig {}),
             MonitorType::Cpu => MonitorConfigDetail::Cpu(CpuMonitorConfig {}),
             MonitorType::Memory => MonitorConfigDetail::Memory(MemoryMonitorConfig {}),
             MonitorType::Disk => MonitorConfigDetail::Disk(DiskMonitorConfig {}),
@@ -235,6 +229,27 @@ pub struct CheckResult {
     pub target: Option<String>,
     pub status: bool,
     pub details: CheckResultDetail,
+}
+
+impl CheckResult {
+    // 把不同监控类型的结果统一转换为日志/持久化所需字段：(状态, 耗时ms, 状态码)
+    // 系统资源类监控（CPU/MEMORY/DISK/PROCESS等）能执行即视为成功
+    pub fn log_fields(&self) -> (bool, u128, Option<u16>) {
+        match &self.details {
+            CheckResultDetail::Http(r) => (
+                r.basic_avaliable.is_reachable,
+                r.performance_timings.total_time,
+                r.basic_avaliable.res_status_code,
+            ),
+            CheckResultDetail::Icmp(r) => (r.is_alive, r.elapsed_ms, None),
+            CheckResultDetail::Tcp(r) => (r.connected, r.elapsed_ms, None),
+            CheckResultDetail::Udp(r) => (r.response_received, r.elapsed_ms, None),
+            CheckResultDetail::Dns(r) => (r.resolved, r.elapsed_ms, None),
+            CheckResultDetail::Ftp(r) => (r.connected, r.elapsed_ms, None),
+            CheckResultDetail::Traceroute(r) => (r.success, 0, None),
+            _ => (self.status, 0, None),
+        }
+    }
 }
 
 // 定义核心的监控结果详情枚举，每种监控类型对应一个具体的结果结构体
@@ -354,27 +369,6 @@ pub struct TcpMonitorResult {
     pub elapsed_ms: u128, // 连接耗时，单位毫秒
 }
 
-impl CheckResult {
-    // 把不同监控类型的结果统一转换为日志/持久化所需字段：(状态, 耗时ms, 状态码)
-    // 系统资源类监控（CPU/MEMORY/DISK/PROCESS等）能执行即视为成功
-    pub fn log_fields(&self) -> (bool, u128, Option<u16>) {
-        match &self.details {
-            CheckResultDetail::Http(r) => (
-                r.basic_avaliable.is_reachable,
-                r.performance_timings.total_time,
-                r.basic_avaliable.res_status_code,
-            ),
-            CheckResultDetail::Icmp(r) => (r.is_alive, r.elapsed_ms, None),
-            CheckResultDetail::Tcp(r) => (r.connected, r.elapsed_ms, None),
-            CheckResultDetail::Udp(r) => (r.response_received, r.elapsed_ms, None),
-            CheckResultDetail::Dns(r) => (r.resolved, r.elapsed_ms, None),
-            CheckResultDetail::Ftp(r) => (r.connected, r.elapsed_ms, None),
-            CheckResultDetail::Traceroute(r) => (r.success, 0, None),
-            _ => (self.status, 0, None),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -382,7 +376,7 @@ mod tests {
         UnknownMonitorResult,
     };
     use crate::tools_types::{HttpBody, HttpMethodTypes, SelfDefineMonitorConfig};
-    use reqwest::header::{HeaderValue, CONTENT_TYPE};
+    use reqwest::header::{CONTENT_TYPE, HeaderValue};
 
     // 从JSON构造配置项（与API请求体/monitor_list.json的实际入参路径一致）
     fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {

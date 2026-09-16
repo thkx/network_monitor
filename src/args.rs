@@ -21,5 +21,8 @@ pub enum Commands {
         // Web API 监听端口
         #[arg(short, long, default_value = "8080")]
         port: u16, // cargo run -- Server --port 8080
+        // 默认监控间隔（秒）：配置项未指定interval时使用
+        #[arg(short, long, default_value = "5")]
+        interval: u64, // cargo run -- Server --interval 30
     },
 }

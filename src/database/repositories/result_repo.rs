@@ -94,33 +94,14 @@ impl CheckResultRepository {
 mod tests {
     use super::{CheckResultModelInsert, CheckResultRepository};
     use crate::database::connect_db::test_pool;
-    use crate::database::models::MonitorConfigInsert;
-    use crate::database::repositories::monitor_repo::MonitorRepository;
+    use crate::database::repositories::test_support::create_test_monitor;
     use std::sync::Arc;
-
-    // check_result.monitor_id 外键指向 monitor_config，先建父行再测
-    fn create_monitor(pool: &Arc<crate::database::connect_db::SqlitePool>) -> i32 {
-        let repo = MonitorRepository::new(pool.clone());
-        repo.create_monitor(&MonitorConfigInsert {
-            name: Some("t-result".to_string()),
-            target: "https://a.com".to_string(),
-            method: Some("GET".to_string()),
-            monitor_type: "HTTP".to_string(),
-            interval_ms: Some(5000),
-            timeout_ms: 5000,
-            config_json: Some("{}".to_string()),
-            enabled: 1,
-            tag: None,
-        })
-        .expect("测试监控创建失败")
-        .id
-    }
 
     #[test]
     fn result_insert_query_and_retention() {
         let dir = tempfile::tempdir().expect("临时目录创建失败");
         let pool = Arc::new(test_pool(dir.path()));
-        let monitor_id = create_monitor(&pool);
+        let monitor_id = create_test_monitor(&pool, "t-result");
         let repo = CheckResultRepository::new(pool);
         let insert = CheckResultModelInsert {
             monitor_id,
@@ -149,7 +130,7 @@ mod tests {
     fn batch_insert_roundtrip_and_empty_noop() {
         let dir = tempfile::tempdir().expect("临时目录创建失败");
         let pool = Arc::new(test_pool(dir.path()));
-        let monitor_id = create_monitor(&pool);
+        let monitor_id = create_test_monitor(&pool, "t-batch");
         let repo = CheckResultRepository::new(pool);
         let inserts: Vec<CheckResultModelInsert> = (1..=3)
             .map(|i| CheckResultModelInsert {

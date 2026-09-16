@@ -355,6 +355,7 @@ pub async fn run_monitor_once(
     monitor_service: web::Data<MonitorService>,
     result_service: web::Data<ResultService>,
     metrics: web::Data<Arc<Mutex<MetricsRegistry>>>,
+    default_interval: web::Data<u64>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
     let row = monitor_service
@@ -373,7 +374,9 @@ pub async fn run_monitor_once(
         .name
         .clone()
         .unwrap_or_else(|| crate::tools_types::display_name(&entry));
-    let config = crate::monitor::types::MonitorConfig::from_entry(&entry, 5);
+    // 未配置interval时使用--interval默认值（与定时调度同源）
+    let interval_default = Arc::unwrap_or_clone(default_interval.into_inner());
+    let config = crate::monitor::types::MonitorConfig::from_entry(&entry, interval_default);
     let monitor = MonitorFactory::create_monitor(config.monitor_type);
     // 单次执行：复用Once模式的执行封装，结果完整返回给前端
     let mut rx = AsyncMonitor::create_once_monitoring(monitor, config).await;
@@ -562,6 +565,7 @@ mod tests {
                 .app_data(web::Data::new(result_service.clone()))
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(metrics.clone()))
+                .app_data(web::Data::new(5u64))
                 .route("/api/status", web::get().to(get_console_status))
                 .route(
                     "/api/monitors/{id}/run",
