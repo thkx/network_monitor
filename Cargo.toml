@@ -29,6 +29,9 @@ url = "2"
 dotenvy = "0.15"
 hmac = "0.12"
 sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

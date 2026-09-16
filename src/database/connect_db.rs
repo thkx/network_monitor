@@ -50,7 +50,7 @@ pub async fn establish_database_connection() -> Result<Arc<SqlitePool>, Box<dyn 
         .await
         .map(Arc::new) // 使用Arc进行封装 方便进行线程间共享
         .map_err(|e| {
-            eprintln!("数据库连接重试失败: {}", e);
+            tracing::error!("数据库连接重试失败: {}", e);
             e
         })?;
     Ok(pool)

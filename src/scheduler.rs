@@ -52,14 +52,14 @@ impl Scheduler {
         let rows = match service.get_all_enabled() {
             Ok(rows) => rows,
             Err(e) => {
-                eprintln!("调度器加载监控配置失败: {}", e);
+                tracing::error!("调度器加载监控配置失败: {}", e);
                 return;
             }
         };
         for row in rows {
             self.spawn_one(row, tx.clone());
         }
-        println!("调度器已启动 {} 个定时监控任务", self.tasks.len());
+        tracing::info!("调度器已启动 {} 个定时监控任务", self.tasks.len());
     }
 
     // 停止单个监控任务（预留按 id 停止的能力，当前热更新统一走 reload_all）
@@ -74,27 +74,30 @@ impl Scheduler {
     fn spawn_one(&mut self, row: MonitorConfigModel, tx: mpsc::Sender<MonitorResultMessage>) {
         // config_json保存了完整的原始配置，反序列化后复用统一的构建逻辑
         let Some(config_json) = row.config_json.clone() else {
-            eprintln!(
+            tracing::error!(
                 "监控配置 {} (id={}) 缺少config_json，跳过",
-                row.target, row.id
+                row.target,
+                row.id
             );
             return;
         };
         let entry: SelfDefineMonitorConfig = match serde_json::from_str(&config_json) {
             Ok(entry) => entry,
             Err(e) => {
-                eprintln!("监控配置 {} (id={}) 解析失败: {}", row.target, row.id, e);
+                tracing::error!("监控配置 {} (id={}) 解析失败: {}", row.target, row.id, e);
                 return;
             }
         };
         // 飞书webhook还是占位符时提前提示，避免告警真正触发时才发现发不出去
         if let Some(alert) = entry.alert_rules.as_ref()
-            && alert.notify_config.webhook_url.contains("you/to/path") {
-                eprintln!(
-                    "警告: 监控 {} (id={}) 的 webhook_url 仍是占位符，告警通知将发送失败",
-                    row.target, row.id
-                );
-            }
+            && alert.notify_config.webhook_url.contains("you/to/path")
+        {
+            tracing::warn!(
+                "监控 {} (id={}) 的 webhook_url 仍是占位符，告警通知将发送失败",
+                row.target,
+                row.id
+            );
+        }
         let name = row.name.clone().unwrap_or_else(|| display_name(&entry));
         let config = build_monitor_config(&entry, 5);
         let monitor = MonitorFactory::create_monitor(config.monitor_type);

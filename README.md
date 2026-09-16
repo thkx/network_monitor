@@ -116,6 +116,23 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | ----------------------- | ----------------- | -------------------------------------- |
 | `DATABASE_URL`          | `./db/monitor.db` | SQLite 数据库路径                      |
 | `RESULT_RETENTION_DAYS` | `30`              | 监控结果保留天数（每 24 小时清理一次） |
+| `RUST_LOG`              | `info`            | 日志级别（trace/debug/info/warn/error，支持按模块覆盖） |
+
+## 日志
+
+基于 `tracing` 的结构化日志，双通道输出：
+
+- **控制台**：人类可读格式（本地时间 + 级别 + 模块）
+- **文件**：`logs/network_monitor.log` 按日滚动，无 ANSI 颜色码，适合 grep/采集
+
+级别约定：启动/调度/告警发送成功为 `info`；**检查不可用、配置异常为 `warn`**；每次检查的可
+用结果与完整字段（check_id/monitor/response_time_ms/status_code）为 `debug`；持久化、通知发
+送失败等需要介入的问题为 `error`。
+
+```bash
+RUST_LOG=debug cargo run -- server    # 看到每次检查的完整结构化日志
+RUST_LOG="info,hyper=warn" cargo run -- server   # 缺省已静音 hyper/reqwest
+```
 
 ## 开发
 
@@ -131,6 +148,7 @@ cargo build         # 构建
 src/
 ├── main.rs              # 入口：三种运行模式 + build_monitor_config 等核心组装逻辑
 ├── args.rs              # clap 命令行定义（once/monitor/server）
+├── logging.rs           # tracing 初始化（控制台 + 按日滚动文件双通道）
 ├── scheduler.rs         # Server模式调度器（任务句柄管理、热更新重建）
 ├── async_monitor.rs     # 定时/单次监控任务封装
 ├── alerts/mod.rs        # 告警引擎（规则评估状态机 + 通知渠道）

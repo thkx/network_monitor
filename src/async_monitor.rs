@@ -60,16 +60,17 @@ impl AsyncMonitor {
                 };
                 // 告警检查在任务内部完成，命中规则时发送通知
                 if let Some(engine) = engine.as_mut()
-                    && let Err(e) = engine.check(&check_result).await {
-                        eprintln!("告警检查失败: {}", e);
-                    }
+                    && let Err(e) = engine.check(&check_result).await
+                {
+                    tracing::error!("告警检查失败: {}", e);
+                }
                 let message = MonitorResultMessage {
                     route: route.clone(),
                     result: check_result,
                 };
                 if tx.send(message).await.is_err() {
                     // 消费端已关闭，结束本监控任务
-                    println!("Error sending result to channel, monitor task exits");
+                    tracing::error!("结果通道发送失败（消费端已关闭），监控任务退出");
                     break;
                 }
             }
@@ -94,7 +95,7 @@ impl AsyncMonitor {
                     details,
                 };
                 if tx.send(check_result).await.is_err() {
-                    println!("Error sending result to channel");
+                    tracing::error!("单次监控结果发送失败（接收端已关闭）");
                 }
             });
             // 返回接收端 对象

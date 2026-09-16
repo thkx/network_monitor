@@ -2,6 +2,9 @@
 mod csv_logger;
 use csv_logger::{CsvLogger, UrlLogResult};
 
+// 结构化日志初始化模块（tracing：控制台 + 按日滚动文件）
+mod logging;
+
 // 定时监控模块
 mod async_monitor;
 use async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
@@ -65,7 +68,9 @@ use tokio::sync::mpsc;
 async fn main() {
     // 读取 .env（如 DATABASE_URL）；没有 .env 或读取失败时静默跳过，使用真实环境变量或代码内默认值
     dotenvy::dotenv().ok();
-    println!("网络监控器 启动...");
+    // 初始化结构化日志（级别RUST_LOG，文件输出logs/按日滚动）；Guard保活到main结束以刷新文件缓冲
+    let _log_guard = logging::init();
+    tracing::info!("网络监控器 启动...");
     // 初始化日志结构体
     let logger = CsvLogger::new("monitor_log.csv");
     // 获取待监控的列表（JSON配置文件，每个监控引擎的参数都是一个对象，方便后续通过页面来配置）
@@ -76,7 +81,7 @@ async fn main() {
     match args.command {
         Commands::Once => {
             if monitor_list.is_empty() {
-                println!("监控列表为空，请在 monitor_list.json 中添加监控配置。");
+                tracing::warn!("监控列表为空，请在 monitor_list.json 中添加监控配置。");
                 return;
             }
             // 对每个监控配置执行一次监控
@@ -91,7 +96,7 @@ async fn main() {
                     if let Some(alert_rules) = entry.alert_rules.as_ref() {
                         let mut engine = AlertsEngine::new(alert_rules.clone());
                         if let Err(e) = engine.check(&result).await {
-                            eprintln!("告警检查失败: {}", e);
+                            tracing::error!("告警检查失败: {}", e);
                         }
                     }
                 }
@@ -99,7 +104,7 @@ async fn main() {
         }
         Commands::Monitor { interval } => {
             if monitor_list.is_empty() {
-                println!("监控列表为空，请在 monitor_list.json 中添加监控配置。");
+                tracing::warn!("监控列表为空，请在 monitor_list.json 中添加监控配置。");
                 return;
             }
             // 所有监控任务共享一个通道，结果由单一消费者顺序处理，避免多通道轮询消费互相阻塞
@@ -143,7 +148,7 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     let pool = match establish_database_connection().await {
         Ok(pool) => pool,
         Err(e) => {
-            eprintln!("数据库连接失败: {}", e);
+            tracing::error!("数据库连接失败: {}", e);
             return;
         }
     };
@@ -163,9 +168,9 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     tokio::spawn(async move {
         loop {
             match result_service_for_cleanup.delete_expired(retention_days) {
-                Ok(n) if n > 0 => println!("已清理 {} 天前的监控结果: {} 条", retention_days, n),
+                Ok(n) if n > 0 => tracing::info!("已清理 {} 天前的监控结果: {} 条", retention_days, n),
                 Ok(_) => {}
-                Err(e) => eprintln!("清理过期监控结果失败: {}", e),
+                Err(e) => tracing::error!("清理过期监控结果失败: {}", e),
             }
             tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
         }
@@ -195,12 +200,12 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     .bind(("127.0.0.1", port))
     {
         Ok(server) => {
-            println!("Web API 已启动: http://127.0.0.1:{}/api/monitors", port);
+            tracing::info!("Web API 已启动: http://127.0.0.1:{}/api/monitors", port);
             if let Err(e) = server.run().await {
-                eprintln!("Web API 服务异常退出: {}", e);
+                tracing::error!("Web API 服务异常退出: {}", e);
             }
         }
-        Err(e) => eprintln!("Web API 端口 {} 绑定失败: {}", port, e),
+        Err(e) => tracing::error!("Web API 端口 {} 绑定失败: {}", port, e),
     }
 }
 
@@ -242,7 +247,7 @@ fn persist_result(result_service: &ResultService, monitor_id: i32, result: &Chec
         response_time: response_time.min(i32::MAX as u128) as i32,
         metadata_json,
     }) {
-        eprintln!("监控结果持久化失败 (monitor_id={}): {}", monitor_id, e);
+        tracing::error!("监控结果持久化失败 (monitor_id={}): {}", monitor_id, e);
     }
 }
 
@@ -255,11 +260,11 @@ fn import_monitor_list(monitor_service: &MonitorService, monitor_list: &[SelfDef
             Ok(None) => {
                 let insert = build_monitor_insert(entry);
                 match monitor_service.create_monitor(&insert) {
-                    Ok(_) => println!("监控配置已导入: {}", name),
-                    Err(e) => eprintln!("监控配置导入失败 {}: {}", name, e),
+                    Ok(_) => tracing::info!("监控配置已导入: {}", name),
+                    Err(e) => tracing::error!("监控配置导入失败 {}: {}", name, e),
                 }
             }
-            Err(e) => eprintln!("查询监控配置 {} 失败: {}", name, e),
+            Err(e) => tracing::error!("查询监控配置 {} 失败: {}", name, e),
         }
     }
 }
@@ -342,7 +347,10 @@ fn build_monitor_config(entry: &SelfDefineMonitorConfig, default_interval: u64) 
                                 Some(HttpBody::Binary(bytes))
                             }
                             Err(e) => {
-                                eprintln!("body(binary) base64解码失败，本次请求不携带body: {}", e);
+                                tracing::warn!(
+                                    "body(binary) base64解码失败，本次请求不携带body: {}",
+                                    e
+                                );
                                 None
                             }
                         }
@@ -397,28 +405,44 @@ fn build_monitor_config(entry: &SelfDefineMonitorConfig, default_interval: u64) 
     }
 }
 
-// 将监控结果写入CSV日志并打印到控制台
+// 将监控结果写入CSV日志并输出结构化日志
+// 级别设计：成功为debug（默认info不显示，RUST_LOG=debug可看全部）、失败为warn（始终可见）
 fn log_result(logger: &CsvLogger, name: &str, result: &CheckResult) {
     let (status, response_time, status_code) = log_fields(result);
     // 兜底类型的诊断信息：把Unknown的description暴露出来，说明为什么走到了兜底
     if let CheckResultDetail::Unknown(u) = &result.details {
-        eprintln!("警告: {}", u.description);
+        tracing::warn!("{}", u.description);
     }
     // 检查ID以16进制输出，用于跨CSV日志与数据库关联同一次检查
     let check_id = format!("{:x}", result.id);
-    logger
-        .log(UrlLogResult {
-            check_id,
-            url: name.to_string(),
-            status,
-            response_time,
-            status_code,
-        })
-        .unwrap();
-    println!(
-        "[{:x}] {} 状态：{}，响应时间：{}ms，状态码：{:?}",
-        result.id, name, status, response_time, status_code
-    );
+    if let Err(e) = logger.log(UrlLogResult {
+        check_id: check_id.clone(),
+        url: name.to_string(),
+        status,
+        response_time,
+        status_code,
+    }) {
+        // CSV写入失败不再panic中断消费循环，降级为错误日志（数据库仍有完整结果）
+        tracing::error!("CSV日志写入失败: {}", e);
+    }
+    let response_time_ms = u64::try_from(response_time).unwrap_or(u64::MAX);
+    if status {
+        tracing::debug!(
+            check_id = %check_id,
+            monitor = %name,
+            response_time_ms,
+            status_code = ?status_code,
+            "检查完成：可用"
+        );
+    } else {
+        tracing::warn!(
+            check_id = %check_id,
+            monitor = %name,
+            response_time_ms,
+            status_code = ?status_code,
+            "检查完成：不可用"
+        );
+    }
 }
 
 // 把不同监控类型的结果统一转换为日志记录所需的字段 (状态, 耗时ms, 状态码)
@@ -445,7 +469,7 @@ fn read_monitor_list(file_name: &str) -> Vec<SelfDefineMonitorConfig> {
     match tools::read_json_file(file_name) {
         Ok(list) => list,
         Err(err) => {
-            eprintln!("Error reading monitor list file: {}", err);
+            tracing::warn!("读取监控列表文件失败: {}", err);
             vec![]
         }
     }

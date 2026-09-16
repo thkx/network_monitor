@@ -53,7 +53,7 @@ impl AlertsEngine {
         // 恢复失败不阻塞主流程，退化为内存态（等价旧行为）
         match repo.get_alerting(monitor_id) {
             Ok(alerting) => engine.alerting = alerting,
-            Err(e) => eprintln!("恢复告警状态失败 (monitor_id={}): {}", monitor_id, e),
+            Err(e) => tracing::error!("恢复告警状态失败 (monitor_id={}): {}", monitor_id, e),
         }
         engine.state = Some((repo, monitor_id));
         engine
@@ -64,7 +64,7 @@ impl AlertsEngine {
         if let Some((repo, monitor_id)) = &self.state
             && let Err(e) = repo.set_alerting(*monitor_id, alerting)
         {
-            eprintln!("保存告警状态失败 (monitor_id={}): {}", monitor_id, e);
+            tracing::error!("保存告警状态失败 (monitor_id={}): {}", monitor_id, e);
         }
     }
 
@@ -326,11 +326,11 @@ impl NotifyEngine {
         match self.notify_type.to_uppercase().as_str() {
             "EMAIL" => {
                 // 邮件通知（预留）
-                println!("[EMAIL告警] {}", message);
+                tracing::info!("[EMAIL告警] {}", message);
             }
             "SMS" => {
                 // 短信通知（预留）
-                println!("[SMS告警] {}", message);
+                tracing::info!("[SMS告警] {}", message);
             }
             "FEISHU" => {
                 // 飞书自定义机器人：msg_type/content结构 + 可选签名
@@ -361,7 +361,7 @@ impl NotifyEngine {
                 self.post_webhook(body, &message, channel).await;
             }
             _ => {
-                println!("未知的告警通知类型: {}", self.notify_type);
+                tracing::warn!("未知的告警通知类型: {}", self.notify_type);
             }
         }
     }
@@ -374,7 +374,7 @@ impl NotifyEngine {
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("{}告警发送失败，创建HTTP客户端异常: {}", channel, e);
+                tracing::error!("{}告警发送失败，创建HTTP客户端异常: {}", channel, e);
                 return;
             }
         };
@@ -386,14 +386,15 @@ impl NotifyEngine {
         {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    println!("{}告警发送成功: {}", channel, message);
+                    tracing::info!("{}告警发送成功: {}", channel, message);
                 } else {
-                    eprintln!("{}告警发送失败，状态码: {}", channel, resp.status());
+                    tracing::error!("{}告警发送失败，状态码: {}", channel, resp.status());
                 }
             }
-            Err(e) => eprintln!(
+            Err(e) => tracing::error!(
                 "{}告警发送失败: {}（请检查notify_config中的webhook_url是否有效）",
-                channel, e
+                channel,
+                e
             ),
         }
     }
