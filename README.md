@@ -134,6 +134,30 @@ RUST_LOG=debug cargo run -- server    # 看到每次检查的完整结构化日�
 RUST_LOG="info,hyper=warn" cargo run -- server   # 缺省已静音 hyper/reqwest
 ```
 
+## 指标端点（Prometheus）
+
+Server 模式暴露 `GET /metrics`（exposition 格式 0.0.4），可直接被 Prometheus 抓取：
+
+```yaml
+scrape_configs:
+  - job_name: network_monitor
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+```
+
+指标（标签：`monitor_id` / `name` / `type`）：
+
+| 指标                                   | 类型    | 说明                              |
+| -------------------------------------- | ------- | --------------------------------- |
+| `network_monitor_up`                   | gauge   | 最近一次检查是否可用（1/0）       |
+| `network_monitor_checks_total`         | counter | 检查总次数（`status=ok/failed`）  |
+| `network_monitor_last_response_time_milliseconds` | gauge | 最近一次检查耗时       |
+| `network_monitor_last_check_timestamp_seconds`    | gauge | 最近一次检查时间       |
+| `network_monitor_alerting`             | gauge   | 是否处于告警抑制状态（查库实时）  |
+
+计数器为内存态，进程重启后归零（Prometheus `rate()` 兼容 counter 重置）；完整历史以 `check_result` 表为准。
+
 ## 开发
 
 ```bash

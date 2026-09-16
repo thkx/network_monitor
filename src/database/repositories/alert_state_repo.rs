@@ -25,6 +25,15 @@ impl AlertStateRepository {
         Ok(state.map(|s| s.alerting == 1).unwrap_or(false))
     }
 
+    // 读取全部抑制状态（/metrics 端点渲染 monitor_alerting 用）
+    pub fn get_all_alerting(&self) -> Result<Vec<(i32, bool)>, diesel::result::Error> {
+        let mut conn = get_connection(&self.pool);
+        let rows: Vec<(i32, i32)> = alert_state::table
+            .select((alert_state::monitor_id, alert_state::alerting))
+            .load(&mut conn)?;
+        Ok(rows.into_iter().map(|(id, a)| (id, a == 1)).collect())
+    }
+
     // 保存抑制状态（upsert：不存在则插入，存在则更新）
     pub fn set_alerting(&self, monitor_id: i32, alerting: bool) -> Result<(), diesel::result::Error> {
         let mut conn = get_connection(&self.pool);

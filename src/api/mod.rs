@@ -1,12 +1,14 @@
 pub mod handles;
 
 use actix_web::web;
+use handles::metrics_handlers;
 use handles::monitor_handlers;
 use handles::result_handlers;
 
-// 统一注册Web API路由：
-//   /api/monitors 监控配置CRUD、/api/results 监控结果查询
+// 统一注册Web路由：
+//   /metrics Prometheus指标端点、/api/monitors 监控配置CRUD、/api/results 监控结果查询
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
+    cfg.route("/metrics", web::get().to(metrics_handlers::get_metrics));
     cfg.service(
         web::scope("/api")
             .route(

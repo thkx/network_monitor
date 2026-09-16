@@ -5,6 +5,10 @@ use csv_logger::{CsvLogger, UrlLogResult};
 // 结构化日志初始化模块（tracing：控制台 + 按日滚动文件）
 mod logging;
 
+// Prometheus指标模块（内存注册表 + /metrics 文本渲染）
+mod metrics;
+use metrics::MetricsRegistry;
+
 // 定时监控模块
 mod async_monitor;
 use async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
@@ -176,11 +180,16 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
         }
     });
 
-    // 3. 后台任务持续消费监控结果：写CSV日志 + 持久化到数据库（告警检查已下沉到各监控任务）
+    // 指标注册表：消费者写入、/metrics端点读取（Server模式专属）
+    let metrics_registry = Arc::new(Mutex::new(MetricsRegistry::new()));
+
+    // 3. 后台任务持续消费监控结果：写CSV日志 + 持久化到数据库 + 更新Prometheus指标
+    // （告警检查已下沉到各监控任务）
     let (tx, rx) = mpsc::channel::<MonitorResultMessage>(100);
     let result_service_for_loop = result_service.clone();
+    let metrics_for_loop = metrics_registry.clone();
     tokio::spawn(async move {
-        consume_results(result_service_for_loop, rx).await;
+        consume_results(result_service_for_loop, rx, metrics_for_loop).await;
     });
 
     // 4. 调度器加载启用配置并启动定时监控；API 增删改配置后可整体重建实现热更新
@@ -190,10 +199,14 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     let scheduler = web::Data::new(Arc::new(Mutex::new(scheduler)));
 
     // 5. 启动Web API服务
+    let metrics_for_app = metrics_registry.clone();
+    let pool_for_app = pool.clone();
     match HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(monitor_service.clone()))
             .app_data(web::Data::new(result_service.clone()))
+            .app_data(web::Data::new(metrics_for_app.clone()))
+            .app_data(web::Data::new(pool_for_app.clone()))
             .app_data(scheduler.clone())
             .configure(api::configure_routes)
     })
@@ -209,15 +222,30 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     }
 }
 
-// 持续接收各监控任务的结果：写CSV、持久化数据库
+// 持续接收各监控任务的结果：更新指标、写CSV、持久化数据库
 // 共享通道 + 单一消费者：所有监控任务的结果在此顺序处理，互不阻塞
 // 告警检查已下沉到各监控任务内部，由任务独占引擎与抑制状态
 async fn consume_results(
     result_service: ResultService,
     mut rx: mpsc::Receiver<MonitorResultMessage>,
+    metrics: Arc<Mutex<MetricsRegistry>>,
 ) {
     let logger = CsvLogger::new("monitor_log.csv");
     while let Some(message) = rx.recv().await {
+        // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
+        {
+            let (status, response_time, _code) = log_fields(&message.result);
+            let response_time_ms = u64::try_from(response_time).unwrap_or(u64::MAX);
+            metrics
+                .lock()
+                .expect("metrics锁中毒")
+                .record(
+                    &message.route,
+                    &message.result.monitor_type.to_string(),
+                    status,
+                    response_time_ms,
+                );
+        }
         log_result(&logger, &message.route.name, &message.result);
         // 结果持久化到check_result表
         if let Some(monitor_id) = message.route.monitor_id {
