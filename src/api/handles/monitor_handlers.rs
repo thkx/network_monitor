@@ -372,8 +372,8 @@ pub async fn run_monitor_once(
     let name = row
         .name
         .clone()
-        .unwrap_or_else(|| crate::display_name(&entry));
-    let config = crate::build_monitor_config(&entry, 5);
+        .unwrap_or_else(|| crate::tools_types::display_name(&entry));
+    let config = crate::monitor::types::MonitorConfig::from_entry(&entry, 5);
     let monitor = MonitorFactory::create_monitor(config.monitor_type);
     // 单次执行：复用Once模式的执行封装，结果完整返回给前端
     let mut rx = AsyncMonitor::create_once_monitoring(monitor, config).await;
@@ -384,7 +384,7 @@ pub async fn run_monitor_once(
     };
     // 指标与持久化与主消费循环同源，手动执行不影响数据一致性
     {
-        let (status, response_time, _code) = crate::log_fields(&result);
+        let (status, response_time, _code) = result.log_fields();
         metrics.lock().expect("metrics锁中毒").record(
             &ResultRoute {
                 name: name.clone(),
@@ -395,8 +395,11 @@ pub async fn run_monitor_once(
             u64::try_from(response_time).unwrap_or(u64::MAX),
         );
     }
-    crate::persist_result(&result_service, id, &result);
-    let (status, response_time, status_code) = crate::log_fields(&result);
+    // 手动执行即时单条落库（不走攒批，结果需立即可查）
+    if let Err(e) = result_service.persist_check(id, &result) {
+        tracing::error!("监控结果持久化失败 (monitor_id={}): {}", id, e);
+    }
+    let (status, response_time, status_code) = result.log_fields();
     let detail_json = serde_json::to_value(&result.details).ok();
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,

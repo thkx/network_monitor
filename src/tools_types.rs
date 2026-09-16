@@ -258,6 +258,15 @@ pub struct SelfDefineMonitorConfig {
     pub description: Option<String>,   // 描述信息
 }
 
+// 监控项的展示名称：优先使用target，没有target时（如CPU/MEMORY/DISK监控）使用监控类型名
+// （此前住在main.rs，scheduler/api需要跨层引用，随配置展示语义归位到类型模块）
+pub fn display_name(entry: &SelfDefineMonitorConfig) -> String {
+    entry
+        .target
+        .clone()
+        .unwrap_or_else(|| entry.monitor_type.to_string())
+}
+
 /// 告警配置：通知类型 + 通知渠道 + 告警触发规则列表
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AlertVerificationRules {

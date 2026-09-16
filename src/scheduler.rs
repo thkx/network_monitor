@@ -9,14 +9,13 @@ use tokio::task::JoinHandle;
 
 use crate::alerts::AlertsEngine;
 use crate::async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
-use crate::build_monitor_config;
 use crate::database::connect_db::SqlitePool;
 use crate::database::models::MonitorConfigModel;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::database::services::monitor_service::MonitorService;
-use crate::display_name;
 use crate::monitor::MonitorFactory;
-use crate::tools_types::SelfDefineMonitorConfig;
+use crate::monitor::types::MonitorConfig;
+use crate::tools_types::{SelfDefineMonitorConfig, display_name};
 
 pub struct Scheduler {
     tasks: HashMap<i32, JoinHandle<()>>,
@@ -99,7 +98,7 @@ impl Scheduler {
             );
         }
         let name = row.name.clone().unwrap_or_else(|| display_name(&entry));
-        let config = build_monitor_config(&entry, 5);
+        let config = MonitorConfig::from_entry(&entry, 5);
         let monitor = MonitorFactory::create_monitor(config.monitor_type);
         // 告警引擎与任务同生命周期；抑制状态从 alert_state 表恢复：
         // 热更新重建任务后引擎不会"失忆"，故障未恢复就不会重复轰炸通知渠道

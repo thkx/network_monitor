@@ -31,7 +31,6 @@ use scheduler::Scheduler;
 // 数据库持久化模块
 mod database;
 use database::connect_db::establish_database_connection;
-use database::models::CheckResultModelInsert;
 use database::repositories::monitor_repo::MonitorRepository;
 use database::repositories::result_repo::CheckResultRepository;
 use database::services::build_monitor_insert;
@@ -44,31 +43,21 @@ use args::{Args, Commands};
 // 监控引擎模块（基于策略模式+工厂模式的不同类型监控系统）
 mod monitor;
 use monitor::MonitorFactory;
-use monitor::types::{
-    CheckResult, CheckResultDetail, CpuMonitorConfig, DiskMonitorConfig, DnsMonitorConfig,
-    FtpMonitorConfig, HttpMonitorConfig, IcmpMonitorConfig, MemoryMonitorConfig, MonitorConfig,
-    MonitorConfigDetail, ProcessMonitorConfig, TcpMonitorConfig, TracerouteMonitorConfig,
-    UdpMonitorConfig, UnknownQueryConfig,
-};
+use monitor::types::{CheckResult, CheckResultDetail, MonitorConfig};
 
 // 工具模块
 mod tools;
 
 // 全局通用的类型定义模块
 mod tools_types;
-use tools_types::{
-    HttpBody, HttpBodyConfig, HttpMethodTypes, MonitorType, SelfDefineMonitorConfig,
-};
+use tools_types::{SelfDefineMonitorConfig, display_name};
 
 // 文件管理模块（独立功能，暂未接入主流程）
 // #[allow(dead_code)]
 // mod fm;
 
 use actix_web::{App, HttpServer, web};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use clap::Parser;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -95,7 +84,7 @@ async fn main() {
             // 对每个监控配置执行一次监控
             for entry in &monitor_list {
                 let name = display_name(entry);
-                let config = build_monitor_config(entry, 5);
+                let config = MonitorConfig::from_entry(entry, 5);
                 let monitor = MonitorFactory::create_monitor(config.monitor_type);
                 let mut rx = AsyncMonitor::create_once_monitoring(monitor, config).await;
                 if let Some(result) = rx.recv().await {
@@ -119,7 +108,7 @@ async fn main() {
             let (tx, mut rx) = mpsc::channel::<MonitorResultMessage>(100);
             for entry in &monitor_list {
                 let name = display_name(entry);
-                let config = build_monitor_config(entry, interval);
+                let config = MonitorConfig::from_entry(entry, interval);
                 // 通过工厂创建对应类型的监控引擎，未配置interval的项使用命令行传入的默认间隔
                 let monitor = MonitorFactory::create_monitor(config.monitor_type);
                 // 告警引擎下沉到任务内部：每个任务独占引擎与抑制状态
@@ -265,7 +254,7 @@ async fn consume_results(
                 };
                 // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
                 {
-                    let (status, response_time, _code) = log_fields(&message.result);
+                    let (status, response_time, _code) = message.result.log_fields();
                     let response_time_ms = u64::try_from(response_time).unwrap_or(u64::MAX);
                     metrics
                         .lock()
@@ -298,57 +287,25 @@ fn flush_batch(result_service: &ResultService, buffer: &mut Vec<MonitorResultMes
     if buffer.is_empty() {
         return;
     }
-    let inserts: Vec<CheckResultModelInsert> = buffer
-        .drain(..)
-        .map(|m| build_check_insert(m.route.monitor_id.unwrap_or_default(), &m.result))
+    // (monitor_id, result)引用对：入队前已过滤monitor_id.is_some()
+    let pairs: Vec<(i32, &CheckResult)> = buffer
+        .iter()
+        .filter_map(|m| m.route.monitor_id.map(|id| (id, &m.result)))
         .collect();
-    match result_service.save_check_results_batch(&inserts) {
-        Ok(n) => tracing::debug!("批量持久化 {} 条监控结果（{}行）", inserts.len(), n),
+    let count = pairs.len();
+    match result_service.persist_checks_batch(&pairs) {
+        Ok(_) => tracing::debug!("批量持久化 {} 条监控结果", count),
         Err(e) => {
             // 降级逐条写入：定位问题行，其余数据不丢（CSV日志另有完整备份）
-            tracing::error!("批量持久化失败({})，降级逐条写入: {} 条", e, inserts.len());
-            for insert in &inserts {
-                if let Err(e) = result_service.save_check_result(insert) {
-                    tracing::error!(
-                        "单条持久化失败 (monitor_id={}): {}",
-                        insert.monitor_id,
-                        e
-                    );
+            tracing::error!("批量持久化失败({})，降级逐条写入: {} 条", e, count);
+            for (monitor_id, result) in pairs {
+                if let Err(e) = result_service.persist_check(monitor_id, result) {
+                    tracing::error!("单条持久化失败 (monitor_id={}): {}", monitor_id, e);
                 }
             }
         }
     }
-}
-
-// 把监控结果持久化到check_result表（手动执行接口用：立即单条落库）
-// metadata_json = {"check_id": "<hex>", "details": {...}}：检查ID一并入库，
-// CSV日志里的check_id即可关联到这条记录（此前两者无法对应）
-// pub(crate)：/api/monitors/{id}/run 手动执行后复用同一持久化逻辑
-pub(crate) fn persist_result(result_service: &ResultService, monitor_id: i32, result: &CheckResult) {
-    let insert = build_check_insert(monitor_id, result);
-    if let Err(e) = result_service.save_check_result(&insert) {
-        tracing::error!("监控结果持久化失败 (monitor_id={}): {}", monitor_id, e);
-    }
-}
-
-// 从检查结果构造入库行（单条与批量持久化共用同一字段构造）
-fn build_check_insert(monitor_id: i32, result: &CheckResult) -> CheckResultModelInsert {
-    let (status, response_time, _status_code) = log_fields(result);
-    let mut metadata = serde_json::Map::new();
-    metadata.insert(
-        "check_id".to_string(),
-        serde_json::Value::String(format!("{:x}", result.id)),
-    );
-    if let Ok(details) = serde_json::to_value(&result.details) {
-        metadata.insert("details".to_string(), details);
-    }
-    CheckResultModelInsert {
-        monitor_id,
-        monitor_type: result.monitor_type.to_string(),
-        status: if status { 1 } else { 0 },
-        response_time: response_time.min(i32::MAX as u128) as i32,
-        metadata_json: serde_json::to_string(&serde_json::Value::Object(metadata)).ok(),
-    }
+    buffer.clear();
 }
 
 // 把JSON配置导入monitor_config表（name有唯一约束，按名称去重保证幂等）
@@ -369,150 +326,10 @@ fn import_monitor_list(monitor_service: &MonitorService, monitor_list: &[SelfDef
     }
 }
 
-// 监控项的展示名称：优先使用target，没有target时（如CPU/MEMORY监控）使用监控类型名
-fn display_name(entry: &SelfDefineMonitorConfig) -> String {
-    entry
-        .target
-        .clone()
-        .unwrap_or_else(|| entry.monitor_type.to_string())
-}
-
-// 根据JSON配置项构建监控任务配置
-// default_interval：配置项未指定interval时使用的默认监控间隔（来自命令行参数）
-// pub(crate)：/api/monitors/{id}/run 手动执行时复用同一构建逻辑
-pub(crate) fn build_monitor_config(
-    entry: &SelfDefineMonitorConfig,
-    default_interval: u64,
-) -> MonitorConfig {
-    let monitor_type = entry.monitor_type;
-    // 按监控类型构建各自的详情参数
-    let details = match monitor_type {
-        MonitorType::Http => {
-            // HTTP请求方法，未配置时默认GET
-            let method = entry.method.clone().unwrap_or(HttpMethodTypes::Get);
-            let mut url = entry.target.clone().unwrap_or_default();
-            // GET/HEAD类请求的params追加为URL查询参数（form_urlencoded做URL编码，值含&/=/空格/中文等特殊字符也安全）
-            if !entry.params.is_empty()
-                && matches!(method, HttpMethodTypes::Get | HttpMethodTypes::Head)
-            {
-                let pairs: Vec<(String, String)> = entry
-                    .params
-                    .iter()
-                    .map(|(k, v)| {
-                        // 字符串值取原文字面量，其他JSON类型用其JSON文本表示
-                        let val = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        (k.clone(), val)
-                    })
-                    .collect();
-                let query = url::form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(pairs)
-                    .finish();
-                let sep = if url.contains('?') { "&" } else { "?" };
-                url = format!("{}{}{}", url, sep, query);
-            }
-            // headers配置转换为HeaderMap，非法的键值直接忽略
-            let mut header_map = HeaderMap::new();
-            for (k, v) in &entry.headers {
-                if let (Ok(name), Ok(value)) = (
-                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                    HeaderValue::from_str(v),
-                ) {
-                    header_map.insert(name, value);
-                }
-            }
-            // 用户已显式配置Content-Type时不再补充默认值
-            let has_content_type = entry
-                .headers
-                .keys()
-                .any(|k| k.eq_ignore_ascii_case("content-type"));
-            // 请求体构造：显式body配置优先；未配置body时保留旧的params语义（POST类请求params作为JSON请求体）
-            let body = if let Some(body_cfg) = entry.body.as_ref() {
-                match body_cfg {
-                    HttpBodyConfig::Text { content } => {
-                        if !has_content_type {
-                            header_map.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-                        }
-                        Some(HttpBody::Text(content.clone()))
-                    }
-                    HttpBodyConfig::Json { content } => Some(HttpBody::Json(content.clone())),
-                    HttpBodyConfig::Binary { content } => {
-                        // binary的content为base64编码，解码失败时忽略该body并告警
-                        match BASE64_STANDARD.decode(content.as_bytes()) {
-                            Ok(bytes) => {
-                                if !has_content_type {
-                                    header_map.insert(
-                                        CONTENT_TYPE,
-                                        HeaderValue::from_static("application/octet-stream"),
-                                    );
-                                }
-                                Some(HttpBody::Binary(bytes))
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "body(binary) base64解码失败，本次请求不携带body: {}",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    }
-                    HttpBodyConfig::Empty => Some(HttpBody::Empty),
-                }
-            } else if !entry.params.is_empty()
-                && matches!(
-                    method,
-                    HttpMethodTypes::Post | HttpMethodTypes::Put | HttpMethodTypes::Patch
-                )
-            {
-                Some(HttpBody::Json(serde_json::Value::Object(
-                    entry.params.clone(),
-                )))
-            } else {
-                None
-            };
-            let headers = if header_map.is_empty() {
-                None
-            } else {
-                Some(header_map)
-            };
-            MonitorConfigDetail::Http(HttpMonitorConfig {
-                url,
-                method,
-                timeout: entry.timeout.unwrap_or(5000),
-                headers,
-                body,
-                rules: entry.content_evaluation_rules.clone(),
-            })
-        }
-        MonitorType::Icmp => MonitorConfigDetail::Icmp(IcmpMonitorConfig {}),
-        MonitorType::Tcp => MonitorConfigDetail::Tcp(TcpMonitorConfig {}),
-        MonitorType::Udp => MonitorConfigDetail::Udp(UdpMonitorConfig {}),
-        MonitorType::Dns => MonitorConfigDetail::Dns(DnsMonitorConfig {}),
-        MonitorType::Ftp => MonitorConfigDetail::Ftp(FtpMonitorConfig {}),
-        MonitorType::Traceroute => MonitorConfigDetail::Traceroute(TracerouteMonitorConfig {}),
-        MonitorType::Cpu => MonitorConfigDetail::Cpu(CpuMonitorConfig {}),
-        MonitorType::Memory => MonitorConfigDetail::Memory(MemoryMonitorConfig {}),
-        MonitorType::Disk => MonitorConfigDetail::Disk(DiskMonitorConfig {}),
-        MonitorType::Process => MonitorConfigDetail::Process(ProcessMonitorConfig {}),
-        MonitorType::Unknown => MonitorConfigDetail::Unknown(UnknownQueryConfig {
-            description: "未知监控类型".to_string(),
-        }),
-    };
-    MonitorConfig {
-        target: entry.target.clone(),
-        interval: Some(entry.interval.unwrap_or(default_interval)),
-        monitor_type,
-        details,
-    }
-}
-
 // 将监控结果写入CSV日志并输出结构化日志
 // 级别设计：成功为debug（默认info不显示，RUST_LOG=debug可看全部）、失败为warn（始终可见）
 fn log_result(logger: &CsvLogger, name: &str, result: &CheckResult) {
-    let (status, response_time, status_code) = log_fields(result);
+    let (status, response_time, status_code) = result.log_fields();
     // 兜底类型的诊断信息：把Unknown的description暴露出来，说明为什么走到了兜底
     if let CheckResultDetail::Unknown(u) = &result.details {
         tracing::warn!("{}", u.description);
@@ -549,26 +366,6 @@ fn log_result(logger: &CsvLogger, name: &str, result: &CheckResult) {
     }
 }
 
-// 把不同监控类型的结果统一转换为日志记录所需的字段 (状态, 耗时ms, 状态码)
-// pub(crate)：控制台的status聚合与手动执行接口复用同一字段提取逻辑
-pub(crate) fn log_fields(result: &CheckResult) -> (bool, u128, Option<u16>) {
-    match &result.details {
-        CheckResultDetail::Http(r) => (
-            r.basic_avaliable.is_reachable,
-            r.performance_timings.total_time,
-            r.basic_avaliable.res_status_code,
-        ),
-        CheckResultDetail::Icmp(r) => (r.is_alive, r.elapsed_ms, None),
-        CheckResultDetail::Tcp(r) => (r.connected, r.elapsed_ms, None),
-        CheckResultDetail::Udp(r) => (r.response_received, r.elapsed_ms, None),
-        CheckResultDetail::Dns(r) => (r.resolved, r.elapsed_ms, None),
-        CheckResultDetail::Ftp(r) => (r.connected, r.elapsed_ms, None),
-        CheckResultDetail::Traceroute(r) => (r.success, 0, None),
-        // 系统资源类监控（CPU/MEMORY/DISK/PROCESS等）能执行即视为成功
-        _ => (result.status, 0, None),
-    }
-}
-
 // 获取监控的列表（从JSON配置文件读取，每个监控引擎的参数都是一个对象）
 fn read_monitor_list(file_name: &str) -> Vec<SelfDefineMonitorConfig> {
     match tools::read_json_file(file_name) {
@@ -580,96 +377,3 @@ fn read_monitor_list(file_name: &str) -> Vec<SelfDefineMonitorConfig> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // 从JSON构造配置项（与API请求体/monitor_list.json的实际入参路径一致）
-    fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
-        serde_json::from_str(json).expect("测试JSON应可反序列化")
-    }
-
-    #[test]
-    fn http_get_params_are_appended_as_query() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"GET","params":{"k":"v"}}"#,
-        );
-        let config = build_monitor_config(&entry, 5);
-        let MonitorConfigDetail::Http(http) = config.details else {
-            panic!("HTTP配置应生成Http详情");
-        };
-        assert_eq!(http.url, "https://a.com/p?k=v");
-        assert!(matches!(http.method, HttpMethodTypes::Get));
-    }
-
-    #[test]
-    fn http_post_params_become_json_body() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"POST","params":{"k":"v"}}"#,
-        );
-        let config = build_monitor_config(&entry, 5);
-        let MonitorConfigDetail::Http(http) = config.details else {
-            panic!("HTTP配置应生成Http详情");
-        };
-        match http.body.expect("POST的params应转为JSON body") {
-            HttpBody::Json(v) => assert_eq!(v["k"], "v"),
-            other => panic!("应为Json body，实际: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn explicit_text_body_overrides_params() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"POST","params":{"k":"v"},"body":{"type":"text","content":"hi"}}"#,
-        );
-        let config = build_monitor_config(&entry, 5);
-        let MonitorConfigDetail::Http(http) = config.details else {
-            panic!("HTTP配置应生成Http详情");
-        };
-        match http.body.expect("显式body应生效") {
-            HttpBody::Text(content) => assert_eq!(content, "hi"),
-            other => panic!("应为Text body，实际: {:?}", other),
-        }
-        // 未显式配置Content-Type时默认补text/plain
-        let headers = http.headers.expect("应补充默认Content-Type头");
-        assert_eq!(
-            headers.get(CONTENT_TYPE),
-            Some(&HeaderValue::from_static("text/plain"))
-        );
-    }
-
-    #[test]
-    fn invalid_binary_body_is_dropped() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"POST","body":{"type":"binary","content":"!!not_base64!!"}}"#,
-        );
-        let config = build_monitor_config(&entry, 5);
-        let MonitorConfigDetail::Http(http) = config.details else {
-            panic!("HTTP配置应生成Http详情");
-        };
-        // base64解码失败：不携带body，避免发出脏数据
-        assert!(http.body.is_none());
-    }
-
-    #[test]
-    fn interval_and_timeout_defaults_apply() {
-        let entry = entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP"}"#);
-        let config = build_monitor_config(&entry, 7);
-        assert_eq!(config.interval, Some(7));
-        let MonitorConfigDetail::Http(http) = config.details else {
-            panic!("HTTP配置应生成Http详情");
-        };
-        assert_eq!(http.timeout, 5000);
-        assert!(http.headers.is_none());
-    }
-
-    #[test]
-    fn unknown_type_falls_back_to_unknown_detail() {
-        let entry = entry_from_json(r#"{"target":"x","monitor_type":"UNKNOWN"}"#);
-        let config = build_monitor_config(&entry, 5);
-        match config.details {
-            MonitorConfigDetail::Unknown(u) => assert_eq!(u.description, "未知监控类型"),
-            other => panic!("应为Unknown详情，实际: {:?}", other),
-        }
-    }
-}
