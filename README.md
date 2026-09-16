@@ -1,4 +1,4 @@
-# 网络监控器（new_hello_world）
+# 网络监控器（network_monitor）
 
 基于 Rust 的多类型网络/系统监控器：定时探测目标、结果落库（SQLite）、CSV 日志、规则告警（飞书/钉钉/企业微信 Webhook）与 Web API 管理。
 
@@ -39,15 +39,15 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 ## Web API 一览
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/monitors?page_no=1&page_size=20&enabled=true` | 分页查询监控配置（enabled 可选筛选） |
-| GET | `/api/monitors/{id}` | 查询单个监控配置 |
-| POST | `/api/monitors` | 创建监控（请求体同 monitor_list.json 单项） |
-| PUT | `/api/monitors/{id}` | 更新监控（enabled 不变） |
-| DELETE | `/api/monitors/{id}` | 删除监控（结果记录级联删除） |
-| PATCH | `/api/monitors/{id}/enabled` | 启用/禁用，body: `{"enabled": true}` |
-| GET | `/api/results?monitor_id=1&page_no=1&page_size=50` | 分页查询监控结果 |
+| 方法   | 路径                                                | 说明                                        |
+| ------ | --------------------------------------------------- | ------------------------------------------- |
+| GET    | `/api/monitors?page_no=1&page_size=20&enabled=true` | 分页查询监控配置（enabled 可选筛选）        |
+| GET    | `/api/monitors/{id}`                                | 查询单个监控配置                            |
+| POST   | `/api/monitors`                                     | 创建监控（请求体同 monitor_list.json 单项） |
+| PUT    | `/api/monitors/{id}`                                | 更新监控（enabled 不变）                    |
+| DELETE | `/api/monitors/{id}`                                | 删除监控（结果记录级联删除）                |
+| PATCH  | `/api/monitors/{id}/enabled`                        | 启用/禁用，body: `{"enabled": true}`        |
+| GET    | `/api/results?monitor_id=1&page_no=1&page_size=50`  | 分页查询监控结果                            |
 
 ## 告警配置示例
 
@@ -64,7 +64,10 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
     },
     "rules": [
       { "rule_type": "AVAILABILITY", "condition": {} },
-      { "rule_type": "RESPONSE_CODE", "condition": { "no_contains": [200, 301] } }
+      {
+        "rule_type": "RESPONSE_CODE",
+        "condition": { "no_contains": [200, 301] }
+      }
     ]
   }
 }
@@ -84,10 +87,10 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 ## 环境变量
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DATABASE_URL` | `./db/monitor.db` | SQLite 数据库路径 |
-| `RESULT_RETENTION_DAYS` | `30` | 监控结果保留天数（每 24 小时清理一次） |
+| 变量                    | 默认值            | 说明                                   |
+| ----------------------- | ----------------- | -------------------------------------- |
+| `DATABASE_URL`          | `./db/monitor.db` | SQLite 数据库路径                      |
+| `RESULT_RETENTION_DAYS` | `30`              | 监控结果保留天数（每 24 小时清理一次） |
 
 ## 开发
 

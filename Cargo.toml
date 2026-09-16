@@ -1,5 +1,5 @@
 [package]
-name = "new_hello_world"
+name = "network_monitor"
 version = "0.1.0"
 edition = "2024"
 

@@ -50,8 +50,8 @@ use tools_types::{
 };
 
 // 文件管理模块（独立功能，暂未接入主流程）
-#[allow(dead_code)]
-mod fm;
+// #[allow(dead_code)]
+// mod fm;
 
 use actix_web::{App, HttpServer, web};
 use base64::Engine as _;
