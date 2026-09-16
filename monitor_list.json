@@ -1,0 +1,79 @@
+[
+  {
+    "target": "https://www.google.com",
+    "monitor_type": "HTTP",
+    "method": "GET",
+    "params": {},
+    "headers": {},
+    "content_evaluation_rules": [
+      {
+        "rule_type": "contains",
+        "rule_content": "Google",
+        "rule_description": "是否包含自定义内容"
+      }
+    ],
+    "alert_rules": {
+      "notify_type": "FEISHU",
+      "notify_config": {
+        "webhook_url": "https://open.feishu.cn/open-apis/bot/you/to/path"
+      },
+      "rules": [
+        {
+          "rule_type": "RESPONSE_CODE",
+          "condition": {
+            "no_contains": [
+              200,
+              301,
+              302
+            ],
+            "contains": [],
+            "regex": ""
+          }
+        }
+      ]
+    },
+    "timeout": 5000
+  },
+  {
+    "target": "https://baidu.com",
+    "monitor_type": "HTTP",
+    "method": "GET",
+    "params": {},
+    "headers": {},
+    "content_evaluation_rules": [],
+    "timeout": 5000
+  },
+  {
+    "target": "https://github.com",
+    "monitor_type": "HTTP",
+    "method": "GET",
+    "params": {},
+    "headers": {},
+    "content_evaluation_rules": [],
+    "timeout": 5000
+  },
+  {
+    "target": "https://httpbin.org/status/200",
+    "monitor_type": "HTTP",
+    "method": "POST",
+    "params": {},
+    "headers": {},
+    "timeout": 5000
+  },
+  {
+    "target": "https://httpbin.org/status/400",
+    "monitor_type": "HTTP",
+    "method": "POST",
+    "params": {},
+    "headers": {},
+    "timeout": 5000
+  },
+  {
+    "target": "https://httpbin.org/status/500",
+    "monitor_type": "HTTP",
+    "method": "GET",
+    "params": {},
+    "headers": {},
+    "timeout": 5000
+  }
+]

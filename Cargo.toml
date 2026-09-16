@@ -1,0 +1,31 @@
+[package]
+name = "new_hello_world"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.6", features = ["derive"] }
+prettytable = "0.10.0"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", features = ["json", "blocking"] }
+tokio = { version = "1.53.1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+trust-dns-resolver = "0.23"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+x509-parser = "0.15"
+sysinfo = "0.30"
+diesel = { version = "2.3.3", features = ["chrono", "serde_json", "sqlite", "r2d2", "returning_clauses_for_sqlite_3_35"] }
+diesel_migrations = { version = "2.3.2", features = ["sqlite"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+backon = "1.6.0"
+actix-web = "4"
+url = "2"
+dotenvy = "0.15"
+hmac = "0.12"
+sha2 = "0.10"

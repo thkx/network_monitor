@@ -1,0 +1,4 @@
+/target
+/db/
+/monitor_log.csv
+.env

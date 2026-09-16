@@ -1,0 +1,38 @@
+pub mod handles;
+
+use actix_web::web;
+use handles::monitor_handlers;
+use handles::result_handlers;
+
+// 统一注册Web API路由：
+//   /api/monitors 监控配置CRUD、/api/results 监控结果查询
+pub fn configure_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::scope("/api")
+            .route(
+                "/monitors",
+                web::get().to(monitor_handlers::get_all_monitors),
+            )
+            .route(
+                "/monitors",
+                web::post().to(monitor_handlers::create_monitor),
+            )
+            .route(
+                "/monitors/{id}",
+                web::get().to(monitor_handlers::get_monitor_by_id),
+            )
+            .route(
+                "/monitors/{id}",
+                web::put().to(monitor_handlers::update_monitor),
+            )
+            .route(
+                "/monitors/{id}",
+                web::delete().to(monitor_handlers::delete_monitor),
+            )
+            .route(
+                "/monitors/{id}/enabled",
+                web::patch().to(monitor_handlers::update_monitor_enabled),
+            )
+            .route("/results", web::get().to(result_handlers::get_check_results)),
+    );
+}
