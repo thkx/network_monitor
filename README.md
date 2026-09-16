@@ -167,6 +167,7 @@ scrape_configs:
 | `network_monitor_checks_total`         | counter | 检查总次数（`status=ok/failed`）  |
 | `network_monitor_last_response_time_milliseconds` | gauge | 最近一次检查耗时       |
 | `network_monitor_last_check_timestamp_seconds`    | gauge | 最近一次检查时间       |
+| `network_monitor_check_duration_seconds`          | histogram | 检查耗时分布（12个桶：5ms~30s，可用 `histogram_quantile()` 算分位数） |
 | `network_monitor_alerting`             | gauge   | 是否处于告警抑制状态（查库实时）  |
 
 计数器为内存态，进程重启后归零（Prometheus `rate()` 兼容 counter 重置）；完整历史以 `check_result` 表为准。

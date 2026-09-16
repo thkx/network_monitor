@@ -9,6 +9,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::async_monitor::ResultRoute;
 
+// 响应耗时直方图桶上界（秒）：HTTP探测多为亚秒级，末桶兜底长超时任务
+const DURATION_BUCKETS_SECS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
+];
+
+// 响应耗时直方图状态：各桶计数（非累计，渲染时累加成Prometheus要求的累计分布）
+#[derive(Debug, Default, Clone)]
+struct DurationHist {
+    // counts[i] = 落入 (DURATION_BUCKETS_SECS[i-1], DURATION_BUCKETS_SECS[i]] 的样本数
+    counts: [u64; DURATION_BUCKETS_SECS.len()],
+    sum_secs: f64, // 样本总和（渲染 _sum）
+    count: u64,    // 样本总数（渲染 _count，也是 +Inf 桶的累计值）
+}
+
+impl DurationHist {
+    // 记录一次耗时（毫秒入参，统一转秒存储与渲染）
+    fn observe_ms(&mut self, ms: u64) {
+        let secs = ms as f64 / 1000.0;
+        // 找到第一个 >= 样本的桶；超出所有桶的样本只计入+Inf
+        if let Some(idx) = DURATION_BUCKETS_SECS.iter().position(|&b| secs <= b) {
+            self.counts[idx] += 1;
+        }
+        self.sum_secs += secs;
+        self.count += 1;
+    }
+}
+
 // 单个监控的指标状态
 #[derive(Debug, Default, Clone)]
 struct MonitorMetrics {
@@ -17,6 +44,7 @@ struct MonitorMetrics {
     last_response_time_ms: u64, // 最近一次检查耗时
     last_check_ts: u64,         // 最近一次检查的unix秒（0=尚未检查）
     last_up: u8,                // 最近一次结果：1可用/0不可用
+    duration: DurationHist,     // 耗时直方图（失败与成功的检查都计入）
 }
 
 // 展示元信息：随每次结果刷新（配置改名/换类型后自动跟随）
@@ -77,6 +105,7 @@ impl MetricsRegistry {
         entry.0.last_response_time_ms = response_time_ms;
         entry.0.last_check_ts = ts;
         entry.0.last_up = u8::from(status);
+        entry.0.duration.observe_ms(response_time_ms);
     }
 
     // 渲染 Prometheus 文本格式（exposition version 0.0.4）
@@ -105,6 +134,8 @@ impl MetricsRegistry {
             "# HELP network_monitor_last_check_timestamp_seconds 最近一次检查时间（unix秒）\n",
         );
         out.push_str("# TYPE network_monitor_last_check_timestamp_seconds gauge\n");
+        out.push_str("# HELP network_monitor_check_duration_seconds 检查耗时分布（秒，成功与失败均计入）\n");
+        out.push_str("# TYPE network_monitor_check_duration_seconds histogram\n");
         if alerting.is_some() {
             out.push_str(
                 "# HELP network_monitor_alerting 是否处于告警抑制状态（1已告警未恢复）\n",
@@ -141,6 +172,26 @@ impl MetricsRegistry {
             out.push_str(&format!(
                 "network_monitor_last_check_timestamp_seconds{{{labels}}} {}\n",
                 m.last_check_ts
+            ));
+            // 直方图：桶计数渲染为累计分布（le标签），末桶+Inf等于总次数
+            let mut cumulative = 0u64;
+            for (b, &c) in DURATION_BUCKETS_SECS.iter().zip(m.duration.counts.iter()) {
+                cumulative += c;
+                out.push_str(&format!(
+                    "network_monitor_check_duration_seconds_bucket{{{labels},le=\"{b}\"}} {cumulative}\n"
+                ));
+            }
+            out.push_str(&format!(
+                "network_monitor_check_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}\n",
+                m.duration.count
+            ));
+            out.push_str(&format!(
+                "network_monitor_check_duration_seconds_sum{{{labels}}} {}\n",
+                m.duration.sum_secs
+            ));
+            out.push_str(&format!(
+                "network_monitor_check_duration_seconds_count{{{labels}}} {}\n",
+                m.duration.count
             ));
             if alerting.is_some() {
                 let alerting_v = i32::from(alerting_map.get(&id).copied().unwrap_or(false));
@@ -254,5 +305,32 @@ mod tests {
     #[test]
     fn escape_label_handles_specials() {
         assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+    }
+
+    #[test]
+    fn histogram_renders_cumulative_buckets_sum_and_count() {
+        let registry = MetricsRegistry::new();
+        registry.record(&route(Some(3), "a"), "HTTP", true, 8); // 0.008s → ≤0.01桶
+        registry.record(&route(Some(3), "a"), "HTTP", true, 120); // 0.12s → ≤0.25桶
+        registry.record(&route(Some(3), "a"), "HTTP", false, 40_000); // 40s → 超出所有桶，仅+Inf
+        let out = registry.render(None);
+        // 单桶与累计分布：le=0.01有1个；le=0.25累计2个；+Inf等于总数3
+        assert!(out.contains(
+            "network_monitor_check_duration_seconds_bucket{monitor_id=\"3\",name=\"a\",type=\"HTTP\",le=\"0.01\"} 1"
+        ));
+        assert!(out.contains(
+            "network_monitor_check_duration_seconds_bucket{monitor_id=\"3\",name=\"a\",type=\"HTTP\",le=\"0.25\"} 2"
+        ));
+        assert!(out.contains(
+            "network_monitor_check_duration_seconds_bucket{monitor_id=\"3\",name=\"a\",type=\"HTTP\",le=\"+Inf\"} 3"
+        ));
+        // sum = 8ms+120ms+40000ms = 40.128s（f64比较容忍精度误差）
+        let sum_line = out.lines().find(|l| l.contains("_sum{")).unwrap();
+        let val: f64 = sum_line.rsplit(' ').next().unwrap().parse().unwrap();
+        assert!((val - 40.128).abs() < 1e-9, "sum应等于样本和: {sum_line}");
+        // count 等于样本总数
+        let count_line = out.lines().find(|l| l.contains("_count{")).unwrap();
+        let count: u64 = count_line.rsplit(' ').next().unwrap().parse().unwrap();
+        assert_eq!(count, 3);
     }
 }
