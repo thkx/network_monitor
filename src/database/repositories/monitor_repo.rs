@@ -162,4 +162,44 @@ mod tests {
         assert_eq!(repo.delete_monitor(created.id).unwrap(), 1);
         assert!(repo.get_monitor_by_id(created.id).unwrap().is_none());
     }
+
+    #[test]
+    fn delete_monitor_cascades_results_and_alert_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(test_pool(dir.path()));
+        let repo = MonitorRepository::new(pool.clone());
+        let created = repo.create_monitor(&insert("t-cascade")).unwrap();
+        // 级联对象：检查结果 + 告警抑制状态
+        {
+            use crate::database::models::CheckResultModelInsert;
+            use crate::database::repositories::alert_state_repo::AlertStateRepository;
+            use crate::database::repositories::result_repo::CheckResultRepository;
+            CheckResultRepository::new(pool.clone())
+                .insert_check_result(&CheckResultModelInsert {
+                    monitor_id: created.id,
+                    monitor_type: "HTTP".to_string(),
+                    status: 1,
+                    response_time: 5,
+                    metadata_json: None,
+                })
+                .unwrap();
+            AlertStateRepository::new(pool.clone())
+                .set_alerting(created.id, true)
+                .unwrap();
+        }
+        // get_connection已开启foreign_keys：删监控应级联清理两张表
+        assert_eq!(repo.delete_monitor(created.id).unwrap(), 1);
+        {
+            use crate::database::repositories::alert_state_repo::AlertStateRepository;
+            use crate::database::repositories::result_repo::CheckResultRepository;
+            let (_, total) = CheckResultRepository::new(pool.clone())
+                .get_check_results(Some(created.id), 1, 10)
+                .unwrap();
+            assert_eq!(total, 0, "check_result应被级联删除");
+            assert!(
+                !AlertStateRepository::new(pool).get_alerting(created.id).unwrap(),
+                "alert_state应被级联删除"
+            );
+        }
+    }
 }

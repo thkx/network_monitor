@@ -2,7 +2,9 @@
 // 支持的规则类型：
 //   RESPONSE_CODE —— HTTP响应码规则（仅HTTP监控生效）
 //   AVAILABILITY  —— 通用可用性规则（全部监控类型生效：探测不可用即触发）
+//   THRESHOLD     —— 阈值规则（系统资源类：CPU/内存/磁盘/进程数值越限）
 // 支持的通知渠道：FEISHU（可选secret签名）、DINGTALK、WECOM（EMAIL/SMS为占位）
+// 告警防抖：consecutive_failures 连续N次命中才告警、consecutive_successes 连续M次正常才恢复
 
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::monitor::types::{CheckResult, CheckResultDetail};
@@ -19,6 +21,10 @@ pub struct AlertsEngine {
     alert_rules: AlertVerificationRules, // 告警规则配置
     // 告警抑制状态：是否处于"已告警、未恢复"状态（防止同一故障反复轰炸通知渠道）
     alerting: bool,
+    // 防抖计数：连续命中/连续正常的次数（仅内存态，重启后重新计数；
+    // 阈值取自配置的 consecutive_failures/consecutive_successes，缺省1）
+    hit_streak: u32,
+    ok_streak: u32,
     // 抑制状态持久化（Server模式）：重启后从 alert_state 表恢复，
     // 避免"故障还在却重复告警"、"恢复时误报"；Once/Monitor模式为None（仅内存态）
     state: Option<(AlertStateRepository, i32)>,
@@ -29,6 +35,8 @@ impl AlertsEngine {
     pub fn new(alert_rule: AlertVerificationRules) -> Self {
         AlertsEngine {
             alerting: false,
+            hit_streak: 0,
+            ok_streak: 0,
             state: None,
             alert_rules: alert_rule.clone(),
             notify: NotifyEngine::new(alert_rule.notify_type, alert_rule.notify_config),
@@ -62,19 +70,27 @@ impl AlertsEngine {
 
     // 告警规则check事件：状态机式告警——异常时只告警一次，恢复时发送一次恢复通知
     // 注意：失败（不可用、未拿到响应码）的监控结果同样参与检查，避免站点宕机时漏告警
+    // 防抖：连续 N 次命中才告警、连续 M 次正常才恢复（缺省均为1，即保持"首次即触发"的旧行为）
     pub async fn check(&mut self, check_result: &CheckResult) -> Result<(), String> {
+        let failures_threshold = self.alert_rules.consecutive_failures.unwrap_or(1).max(1);
+        let successes_threshold = self.alert_rules.consecutive_successes.unwrap_or(1).max(1);
         match self.evaluate(check_result) {
-            // 命中规则：仅在"未告警"状态下发送一次，之后抑制重复告警
+            // 命中规则：连续命中达到阈值且未处于告警状态时发送，之后抑制重复告警
             Some(message) => {
-                if !self.alerting {
+                self.hit_streak = self.hit_streak.saturating_add(1);
+                self.ok_streak = 0;
+                if !self.alerting && self.hit_streak >= failures_threshold {
                     self.notify.send_alert_message(message).await;
                     self.alerting = true;
+                    self.hit_streak = 0;
                     self.persist_state(true);
                 }
             }
-            // 未命中任何规则视为正常：从告警状态恢复时发送一次恢复通知
+            // 未命中任何规则视为正常：连续正常达到阈值时发送一次恢复通知
             None => {
-                if self.alerting {
+                self.ok_streak = self.ok_streak.saturating_add(1);
+                self.hit_streak = 0;
+                if self.alerting && self.ok_streak >= successes_threshold {
                     let target = check_result.target.clone().unwrap_or_default();
                     self.notify
                         .send_alert_message(format!(
@@ -85,6 +101,7 @@ impl AlertsEngine {
                         ))
                         .await;
                     self.alerting = false;
+                    self.ok_streak = 0;
                     self.persist_state(false);
                 }
             }
@@ -118,6 +135,13 @@ impl AlertsEngine {
                         ));
                     }
                 }
+                AlertRuleTypes::Threshold => {
+                    // 阈值规则：系统资源类监控的数值越限告警
+                    if let Some(message) = evaluate_threshold(check_result, &single_rule.condition)
+                    {
+                        return Some(message);
+                    }
+                }
                 AlertRuleTypes::Content => {
                     // 内容匹配规则（预留）
                 }
@@ -141,6 +165,7 @@ impl AlertsEngine {
             contains,
             no_contains,
             regex,
+            ..
         } = condition;
         // 未获取到响应码说明请求失败，直接触发告警
         let Some(code) = http_result.basic_avaliable.res_status_code else {
@@ -196,6 +221,58 @@ fn is_target_available(check_result: &CheckResult) -> bool {
         | CheckResultDetail::Disk(_)
         | CheckResultDetail::Process(_) => true,
         CheckResultDetail::Unknown(_) => false,
+    }
+}
+
+// 阈值规则评估（CPU/内存/磁盘/进程有意义）：数值越限返回告警消息
+// 任务执行失败时跳过（此时数值不可信，失败场景已由AVAILABILITY规则覆盖）
+fn evaluate_threshold(check_result: &CheckResult, condition: &NotifyCondition) -> Option<String> {
+    let th = condition.threshold.as_ref()?;
+    if !check_result.status {
+        return None;
+    }
+    let metric = th.metric.to_lowercase();
+    let (value, unit): (f64, &str) = match &check_result.details {
+        CheckResultDetail::Cpu(r) if metric == "cpu" => (r.usage_percent as f64, "%"),
+        CheckResultDetail::Memory(r) if metric == "memory" => (r.usage_percent as f64, "%"),
+        CheckResultDetail::Disk(r) if metric == "disk" => {
+            // 磁盘按总量换算使用率（总容量为0时跳过，避免除零误报）
+            if r.total_bytes == 0 {
+                return None;
+            }
+            let used_percent =
+                (r.total_bytes - r.available_bytes) as f64 / r.total_bytes as f64 * 100.0;
+            (used_percent, "%")
+        }
+        CheckResultDetail::Disk(r) if metric == "available_bytes" => {
+            (r.available_bytes as f64, "B")
+        }
+        CheckResultDetail::Process(r) if metric == "process" => (r.process_count as f64, "个"),
+        // 结果类型与metric不匹配（如cpu规则配在HTTP监控上）：跳过而不是误判
+        _ => return None,
+    };
+    let hit = match th.op.as_str() {
+        ">" => value > th.value,
+        ">=" => value >= th.value,
+        "<" => value < th.value,
+        "<=" => value <= th.value,
+        "==" | "=" => (value - th.value).abs() < f64::EPSILON,
+        // 非法比较符直接跳过（API侧已校验，防御JSON直写数据库的场景）
+        _ => false,
+    };
+    if hit {
+        Some(format!(
+            "[监控告警] target: {} | {} | {} {} {}（当前 {:.1}{}）",
+            check_result.target.as_deref().unwrap_or("-"),
+            check_result.monitor_type,
+            th.metric,
+            th.op,
+            th.value,
+            value,
+            unit
+        ))
+    } else {
+        None
     }
 }
 
@@ -339,10 +416,13 @@ fn feishu_sign(timestamp: i64, secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{detail_summary, failure_reason, feishu_sign, is_target_available, AlertsEngine};
-    use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
+    use crate::monitor::types::{
+        CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
+        MemoryMonitorResult,
+    };
     use crate::tools_types::{
         AlertRuleTypes, AlertSingleRule, AlertVerificationRules, BasicAvailability,
-        HttpMonitorResult, MonitorType, NotifyCondition, NotifyConfig,
+        HttpMonitorResult, MonitorType, NotifyCondition, NotifyConfig, ThresholdCondition,
     };
 
     // 构造HTTP类型的检查结果（其余字段走Default）
@@ -363,7 +443,11 @@ mod tests {
         }
     }
 
-    fn engine_with_rules(rules: Vec<AlertSingleRule>) -> AlertsEngine {
+    fn engine_with_rules_cfg(
+        rules: Vec<AlertSingleRule>,
+        failures: Option<u32>,
+        successes: Option<u32>,
+    ) -> AlertsEngine {
         AlertsEngine::new(AlertVerificationRules {
             notify_type: "FEISHU".to_string(),
             notify_config: NotifyConfig {
@@ -371,7 +455,13 @@ mod tests {
                 secret: None,
             },
             rules,
+            consecutive_failures: failures,
+            consecutive_successes: successes,
         })
+    }
+
+    fn engine_with_rules(rules: Vec<AlertSingleRule>) -> AlertsEngine {
+        engine_with_rules_cfg(rules, None, None)
     }
 
     fn availability_rule() -> AlertSingleRule {
@@ -388,7 +478,35 @@ mod tests {
                 no_contains,
                 contains: vec![],
                 regex: String::new(),
+                ..Default::default()
             },
+        }
+    }
+
+    fn threshold_rule(metric: &str, op: &str, value: f64) -> AlertSingleRule {
+        AlertSingleRule {
+            rule_type: AlertRuleTypes::Threshold,
+            condition: NotifyCondition {
+                threshold: Some(ThresholdCondition {
+                    metric: metric.to_string(),
+                    op: op.to_string(),
+                    value,
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn cpu_result(usage: f32) -> CheckResult {
+        CheckResult {
+            id: 5,
+            monitor_type: MonitorType::Cpu,
+            target: None,
+            status: true,
+            details: CheckResultDetail::Cpu(CpuMonitorResult {
+                usage_percent: usage,
+                core_count: 8,
+            }),
         }
     }
 
@@ -513,5 +631,141 @@ mod tests {
         );
         let failed = http_result(false, false, None);
         assert_eq!(detail_summary(&failed.details), "请求失败（未知原因）");
+    }
+
+    #[tokio::test]
+    async fn default_threshold_alerts_immediately() {
+        // 缺省（未配置防抖）：首次命中即告警，保持旧行为
+        let mut engine = engine_with_rules(vec![availability_rule()]);
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(engine.alerting);
+    }
+
+    #[tokio::test]
+    async fn debounce_requires_consecutive_failures() {
+        let mut engine = engine_with_rules_cfg(vec![availability_rule()], Some(3), None);
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(!engine.alerting, "第1次命中未达阈值");
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(!engine.alerting, "第2次命中仍未达阈值");
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(engine.alerting, "第3次命中应触发告警");
+    }
+
+    #[tokio::test]
+    async fn debounce_recovery_requires_consecutive_successes() {
+        let mut engine = engine_with_rules_cfg(vec![availability_rule()], Some(1), Some(2));
+        engine
+            .check(&http_result(false, false, None))
+            .await
+            .unwrap();
+        assert!(engine.alerting, "failures=1时立即告警");
+        // 第1次正常：未达恢复阈值，仍处告警态
+        engine
+            .check(&http_result(true, true, Some(200)))
+            .await
+            .unwrap();
+        assert!(engine.alerting);
+        // 第2次连续正常：发送恢复
+        engine
+            .check(&http_result(true, true, Some(200)))
+            .await
+            .unwrap();
+        assert!(!engine.alerting);
+    }
+
+    #[tokio::test]
+    async fn flap_between_ok_and_hit_never_fires() {
+        // 状态反复抖动时，hit/ok连续计数不断被清零，永远达不到阈值
+        let mut engine = engine_with_rules_cfg(vec![availability_rule()], Some(2), Some(2));
+        for _ in 0..4 {
+            engine
+                .check(&http_result(true, false, None))
+                .await
+                .unwrap();
+            engine
+                .check(&http_result(true, true, Some(200)))
+                .await
+                .unwrap();
+        }
+        assert!(!engine.alerting);
+    }
+
+    #[test]
+    fn threshold_triggers_on_breach() {
+        let engine = engine_with_rules_cfg(vec![threshold_rule("cpu", ">", 80.0)], None, None);
+        let msg = engine.evaluate(&cpu_result(93.2)).expect("越限应命中告警");
+        assert!(msg.contains("cpu > 80"));
+        assert!(msg.contains("93.2"));
+        assert!(engine.evaluate(&cpu_result(50.0)).is_none(), "未越限不应告警");
+    }
+
+    #[test]
+    fn threshold_metric_mismatch_is_skipped() {
+        // cpu规则配在Memory结果上：跳过而不是误判
+        let engine = engine_with_rules_cfg(vec![threshold_rule("cpu", ">", 1.0)], None, None);
+        let mem = CheckResult {
+            id: 6,
+            monitor_type: MonitorType::Memory,
+            target: None,
+            status: true,
+            details: CheckResultDetail::Memory(MemoryMonitorResult {
+                total_bytes: 100,
+                used_bytes: 99,
+                usage_percent: 99.0,
+            }),
+        };
+        assert!(engine.evaluate(&mem).is_none());
+    }
+
+    #[test]
+    fn threshold_skipped_when_task_failed() {
+        let engine = engine_with_rules_cfg(vec![threshold_rule("cpu", ">", 1.0)], None, None);
+        let mut failed = cpu_result(93.2);
+        failed.status = false;
+        assert!(engine.evaluate(&failed).is_none());
+    }
+
+    #[test]
+    fn disk_threshold_computes_usage() {
+        let engine = engine_with_rules_cfg(vec![threshold_rule("disk", ">=", 90.0)], None, None);
+        let disk = CheckResult {
+            id: 7,
+            monitor_type: MonitorType::Disk,
+            target: None,
+            status: true,
+            details: CheckResultDetail::Disk(DiskMonitorResult {
+                total_bytes: 1000,
+                available_bytes: 50, // 使用率 = 95%
+                disks: vec![],
+            }),
+        };
+        assert!(engine.evaluate(&disk).is_some());
+    }
+
+    #[test]
+    fn threshold_missing_condition_is_skipped() {
+        // THRESHOLD规则未配置threshold条件：跳过（API侧会拦，这里防御JSON直写库）
+        let engine = engine_with_rules_cfg(
+            vec![AlertSingleRule {
+                rule_type: AlertRuleTypes::Threshold,
+                condition: NotifyCondition::default(),
+            }],
+            None,
+            None,
+        );
+        assert!(engine.evaluate(&cpu_result(99.0)).is_none());
     }
 }

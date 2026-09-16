@@ -33,6 +33,10 @@ pub fn establish_connection() -> Result<SqlitePool, Box<dyn Error>> {
     // 大幅降低Web API读与监控结果写并发时的 database is locked 概率
     conn.batch_execute("PRAGMA journal_mode = WAL;")
         .map_err(|e| format!("Failed to set WAL journal mode: {}", e))?;
+    // 外键约束是连接级参数（无法持久化到库文件）：不开启则 ON DELETE CASCADE 全部失效，
+    // 删监控会留下 check_result/alert_state 孤儿行
+    conn.batch_execute("PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
     conn.run_pending_migrations(MIGRATIONS)
         .map_err(|e| format!("Failed to run database migrations: {}", e))?;
     Ok(pool)
@@ -55,9 +59,9 @@ pub async fn establish_database_connection() -> Result<Arc<SqlitePool>, Box<dyn 
 // 定义获取链接方法 方便业务层获取统一的链接池
 pub fn get_connection(pool: &SqlitePool) -> SqlitePooledConnection {
     let mut conn = pool.get().expect("Failed to get connection from pool.");
-    // busy_timeout是连接级参数（无法像WAL一样持久化到库文件），每次取出连接时设置：
-    // 遇到锁时最多等待5秒再报错，而不是立刻抛 database is locked
-    let _ = conn.batch_execute("PRAGMA busy_timeout = 5000;");
+    // 连接级参数每次取出连接时设置：busy_timeout遇锁最多等5秒；
+    // foreign_keys开启级联删除（删监控自动清理check_result/alert_state）
+    let _ = conn.batch_execute("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     conn
 }
 

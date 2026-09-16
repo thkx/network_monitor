@@ -68,7 +68,9 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
         "rule_type": "RESPONSE_CODE",
         "condition": { "no_contains": [200, 301] }
       }
-    ]
+    ],
+    "consecutive_failures": 3,
+    "consecutive_successes": 2
   }
 }
 ```
@@ -76,6 +78,27 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - `notify_type` 支持 `FEISHU` / `DINGTALK` / `WECOM`（大小写不敏感）
 - 钉钉机器人若开启"加签"安全设置，需自行在 webhook_url 上拼接 timestamp/sign 参数
 - `AVAILABILITY` 对所有监控类型生效；`RESPONSE_CODE` 仅对 HTTP 生效
+- **防抖**：`consecutive_failures` 连续 N 次命中才发告警、`consecutive_successes` 连续 M 次正常才发恢复通知（缺省均为 1；可根治网络抖动误报）
+- **THRESHOLD 阈值规则**（系统资源类）示例：
+
+```json
+{
+  "target": null,
+  "monitor_type": "CPU",
+  "alert_rules": {
+    "notify_type": "FEISHU",
+    "notify_config": { "webhook_url": "https://..." },
+    "rules": [
+      {
+        "rule_type": "THRESHOLD",
+        "condition": { "threshold": { "metric": "cpu", "op": ">", "value": 80 } }
+      }
+    ]
+  }
+}
+```
+
+`metric` 支持 `cpu` / `memory` / `disk`（按总量换算使用率，也可用 `available_bytes`）/ `process`；`op` 支持 `> >= < <= ==`。
 
 ## 配置校验规则
 
@@ -84,6 +107,8 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - `interval`：1 ~ 86400 秒
 - `timeout`：1 ~ 300000 毫秒
 - 内容规则中的 `regex`：必须是合法正则表达式
+- `consecutive_failures` / `consecutive_successes`：1 ~ 1000
+- THRESHOLD 规则必须配置 `threshold`，且 `op` 必须合法
 
 ## 环境变量
 
@@ -95,7 +120,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（34个：纯函数单测 + 临时库集成测试）
+cargo test          # 运行全部测试（49个：纯函数单测 + 临时库集成测试 + 外键级联验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```

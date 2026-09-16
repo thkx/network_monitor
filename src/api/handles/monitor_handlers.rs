@@ -7,7 +7,9 @@ use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
 use crate::database::services::monitor_service::MonitorService;
 use crate::database::services::{build_monitor_insert};
 use crate::scheduler::Scheduler;
-use crate::tools_types::{ContentVerificationRules, SelfDefineMonitorConfig};
+use crate::tools_types::{
+    AlertRuleTypes, ContentVerificationRules, SelfDefineMonitorConfig,
+};
 
 // 定义统一的返回数据结构
 #[derive(Debug, Serialize, Deserialize)]
@@ -243,6 +245,37 @@ fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Err
             )));
         }
     }
+    // 告警配置校验：防抖参数范围 + THRESHOLD规则的阈值条件
+    if let Some(cfg) = entry.alert_rules.as_ref() {
+        for (label, n) in [
+            ("consecutive_failures", cfg.consecutive_failures),
+            ("consecutive_successes", cfg.consecutive_successes),
+        ] {
+            if let Some(v) = n
+                && (v == 0 || v > 1000)
+            {
+                return Err(actix_web::error::ErrorBadRequest(format!(
+                    "{} 需在 1 ~ 1000 之间",
+                    label
+                )));
+            }
+        }
+        for rule in cfg.rules.iter() {
+            if rule.rule_type == AlertRuleTypes::Threshold {
+                let Some(th) = rule.condition.threshold.as_ref() else {
+                    return Err(actix_web::error::ErrorBadRequest(
+                        "THRESHOLD 规则必须配置 threshold 条件",
+                    ));
+                };
+                if !matches!(th.op.as_str(), ">" | ">=" | "<" | "<=" | "==" | "=") {
+                    return Err(actix_web::error::ErrorBadRequest(format!(
+                        "THRESHOLD 规则的 op 非法: {:?}（支持 > >= < <= ==）",
+                        th.op
+                    )));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -305,5 +338,51 @@ mod tests {
             r#"{"target":"https://a.com","monitor_type":"HTTP","interval":10,"timeout":5000,"content_evaluation_rules":[{"rule_type":"regex","rule_content":"5\\d\\d","rule_description":""}]}"#,
         );
         assert!(validate_config(&entry).is_ok());
+    }
+
+    #[test]
+    fn debounce_zero_is_rejected() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[],"consecutive_failures":0}}"#,
+        );
+        assert!(validate_config(&entry).is_err());
+    }
+
+    #[test]
+    fn debounce_upper_bound_is_rejected() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[],"consecutive_successes":1001}}"#,
+        );
+        assert!(validate_config(&entry).is_err());
+    }
+
+    #[test]
+    fn debounce_valid_value_passes() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[],"consecutive_failures":3,"consecutive_successes":2}}"#,
+        );
+        assert!(validate_config(&entry).is_ok());
+    }
+
+    #[test]
+    fn threshold_rule_requires_condition() {
+        // THRESHOLD规则缺threshold条件：拒绝
+        let missing = entry_from_json(
+            r#"{"target":"x","monitor_type":"CPU","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[{"rule_type":"THRESHOLD","condition":{}}]}}"#,
+        );
+        assert!(validate_config(&missing).is_err());
+    }
+
+    #[test]
+    fn threshold_rule_rejects_bad_op() {
+        let bad = entry_from_json(
+            r#"{"target":"x","monitor_type":"CPU","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[{"rule_type":"THRESHOLD","condition":{"threshold":{"metric":"cpu","op":"~","value":80}}}]}}"#,
+        );
+        assert!(validate_config(&bad).is_err());
+        // 合法op通过
+        let good = entry_from_json(
+            r#"{"target":"x","monitor_type":"CPU","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[{"rule_type":"THRESHOLD","condition":{"threshold":{"metric":"cpu","op":">=","value":80}}}]}}"#,
+        );
+        assert!(validate_config(&good).is_ok());
     }
 }

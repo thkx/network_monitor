@@ -265,6 +265,12 @@ pub struct AlertVerificationRules {
     pub notify_config: NotifyConfig,       // 通知渠道配置
     #[serde(default)]
     pub rules: Vec<AlertSingleRule>,       // 告警触发规则列表
+    /// 告警防抖：连续 N 次命中规则才发送告警（缺省1=首次命中即告警；根治网络抖动误报）
+    #[serde(default)]
+    pub consecutive_failures: Option<u32>,
+    /// 恢复防抖：连续 M 次正常才发送恢复通知（缺省1；防止单次成功误报恢复）
+    #[serde(default)]
+    pub consecutive_successes: Option<u32>,
 }
 
 /// 告警通知渠道配置
@@ -288,11 +294,13 @@ pub struct AlertSingleRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AlertRuleTypes {
     #[serde(rename = "RESPONSE_CODE")]
-    ResponseCode, // 响应码规则
+    ResponseCode, // 响应码规则（仅HTTP）
     #[serde(rename = "CONTENT")]
     Content, // 内容匹配规则（预留）
     #[serde(rename = "AVAILABILITY")]
-    Availability, // 可用性规则（预留）
+    Availability, // 可用性规则（全部监控类型生效）
+    #[serde(rename = "THRESHOLD")]
+    Threshold, // 阈值规则（系统资源类：CPU/内存/磁盘/进程）
 }
 
 /// 告警触发条件
@@ -304,6 +312,17 @@ pub struct NotifyCondition {
     pub contains: Vec<u16>,    // 响应码在列表内则触发告警
     #[serde(default)]
     pub regex: String,         // 响应码正则匹配
+    /// 阈值条件（THRESHOLD规则用）：如 {"metric":"cpu","op":">","value":80}
+    #[serde(default)]
+    pub threshold: Option<ThresholdCondition>,
+}
+
+/// 阈值条件：metric为资源类别，op为比较符，value为阈值
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ThresholdCondition {
+    pub metric: String, // cpu / memory / disk（使用率）/ available_bytes / process
+    pub op: String,     // > >= < <= ==
+    pub value: f64,     // 阈值
 }
 
 /// HTTP请求体配置（JSON配置文件/API请求体中的表达形式）
