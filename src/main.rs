@@ -450,3 +450,97 @@ fn read_monitor_list(file_name: &str) -> Vec<SelfDefineMonitorConfig> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 从JSON构造配置项（与API请求体/monitor_list.json的实际入参路径一致）
+    fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
+        serde_json::from_str(json).expect("测试JSON应可反序列化")
+    }
+
+    #[test]
+    fn http_get_params_are_appended_as_query() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"GET","params":{"k":"v"}}"#,
+        );
+        let config = build_monitor_config(&entry, 5);
+        let MonitorConfigDetail::Http(http) = config.details else {
+            panic!("HTTP配置应生成Http详情");
+        };
+        assert_eq!(http.url, "https://a.com/p?k=v");
+        assert!(matches!(http.method, HttpMethodTypes::Get));
+    }
+
+    #[test]
+    fn http_post_params_become_json_body() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"POST","params":{"k":"v"}}"#,
+        );
+        let config = build_monitor_config(&entry, 5);
+        let MonitorConfigDetail::Http(http) = config.details else {
+            panic!("HTTP配置应生成Http详情");
+        };
+        match http.body.expect("POST的params应转为JSON body") {
+            HttpBody::Json(v) => assert_eq!(v["k"], "v"),
+            other => panic!("应为Json body，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn explicit_text_body_overrides_params() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"POST","params":{"k":"v"},"body":{"type":"text","content":"hi"}}"#,
+        );
+        let config = build_monitor_config(&entry, 5);
+        let MonitorConfigDetail::Http(http) = config.details else {
+            panic!("HTTP配置应生成Http详情");
+        };
+        match http.body.expect("显式body应生效") {
+            HttpBody::Text(content) => assert_eq!(content, "hi"),
+            other => panic!("应为Text body，实际: {:?}", other),
+        }
+        // 未显式配置Content-Type时默认补text/plain
+        let headers = http.headers.expect("应补充默认Content-Type头");
+        assert_eq!(
+            headers.get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/plain"))
+        );
+    }
+
+    #[test]
+    fn invalid_binary_body_is_dropped() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com/p","monitor_type":"HTTP","method":"POST","body":{"type":"binary","content":"!!not_base64!!"}}"#,
+        );
+        let config = build_monitor_config(&entry, 5);
+        let MonitorConfigDetail::Http(http) = config.details else {
+            panic!("HTTP配置应生成Http详情");
+        };
+        // base64解码失败：不携带body，避免发出脏数据
+        assert!(http.body.is_none());
+    }
+
+    #[test]
+    fn interval_and_timeout_defaults_apply() {
+        let entry = entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP"}"#);
+        let config = build_monitor_config(&entry, 7);
+        assert_eq!(config.interval, Some(7));
+        let MonitorConfigDetail::Http(http) = config.details else {
+            panic!("HTTP配置应生成Http详情");
+        };
+        assert_eq!(http.timeout, 5000);
+        assert!(http.headers.is_none());
+    }
+
+    #[test]
+    fn unknown_type_falls_back_to_unknown_detail() {
+        let entry = entry_from_json(r#"{"target":"x","monitor_type":"UNKNOWN"}"#);
+        let config = build_monitor_config(&entry, 5);
+        match config.details {
+            MonitorConfigDetail::Unknown(u) => assert_eq!(u.description, "未知监控类型"),
+            other => panic!("应为Unknown详情，实际: {:?}", other),
+        }
+    }
+}

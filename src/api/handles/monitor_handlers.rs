@@ -250,3 +250,60 @@ fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Err
 fn internal_error(e: diesel::result::Error) -> actix_web::Error {
     actix_web::error::ErrorInternalServerError(format!("Database error: {}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_config;
+    use crate::tools_types::SelfDefineMonitorConfig;
+
+    fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
+        serde_json::from_str(json).expect("测试JSON应可反序列化")
+    }
+
+    #[test]
+    fn zero_interval_is_rejected() {
+        let entry =
+            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","interval":0}"#);
+        assert!(validate_config(&entry).is_err());
+    }
+
+    #[test]
+    fn interval_over_one_day_is_rejected() {
+        let entry =
+            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","interval":86401}"#);
+        assert!(validate_config(&entry).is_err());
+    }
+
+    #[test]
+    fn boundary_interval_is_accepted() {
+        let entry =
+            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","interval":86400}"#);
+        assert!(validate_config(&entry).is_ok());
+    }
+
+    #[test]
+    fn invalid_timeout_is_rejected() {
+        let zero =
+            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","timeout":0}"#);
+        assert!(validate_config(&zero).is_err());
+        let over =
+            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","timeout":300001}"#);
+        assert!(validate_config(&over).is_err());
+    }
+
+    #[test]
+    fn invalid_regex_is_rejected() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","content_evaluation_rules":[{"rule_type":"regex","rule_content":"([bad","rule_description":""}]}"#,
+        );
+        assert!(validate_config(&entry).is_err());
+    }
+
+    #[test]
+    fn valid_config_passes() {
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","interval":10,"timeout":5000,"content_evaluation_rules":[{"rule_type":"regex","rule_content":"5\\d\\d","rule_description":""}]}"#,
+        );
+        assert!(validate_config(&entry).is_ok());
+    }
+}

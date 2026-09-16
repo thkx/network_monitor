@@ -60,3 +60,59 @@ impl CheckResultRepository {
         Ok((results, total))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckResultModelInsert, CheckResultRepository};
+    use crate::database::connect_db::test_pool;
+    use crate::database::models::MonitorConfigInsert;
+    use crate::database::repositories::monitor_repo::MonitorRepository;
+    use std::sync::Arc;
+
+    // check_result.monitor_id 外键指向 monitor_config，先建父行再测
+    fn create_monitor(pool: &Arc<crate::database::connect_db::SqlitePool>) -> i32 {
+        let repo = MonitorRepository::new(pool.clone());
+        repo.create_monitor(&MonitorConfigInsert {
+            name: Some("t-result".to_string()),
+            target: "https://a.com".to_string(),
+            method: Some("GET".to_string()),
+            monitor_type: "HTTP".to_string(),
+            interval_ms: Some(5000),
+            timeout_ms: 5000,
+            config_json: Some("{}".to_string()),
+            enabled: 1,
+            tag: None,
+        })
+        .expect("测试监控创建失败")
+        .id
+    }
+
+    #[test]
+    fn result_insert_query_and_retention() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_id = create_monitor(&pool);
+        let repo = CheckResultRepository::new(pool);
+        let insert = CheckResultModelInsert {
+            monitor_id,
+            monitor_type: "HTTP".to_string(),
+            status: 1,
+            response_time: 12,
+            metadata_json: Some(r#"{"check_id":"abc"}"#.to_string()),
+        };
+        repo.insert_check_result(&insert).unwrap();
+        // 按monitor_id过滤分页查询
+        let (list, total) = repo.get_check_results(Some(monitor_id), 1, 10).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(list[0].response_time, 12);
+        assert_eq!(
+            list[0].metadata_json.as_deref(),
+            Some(r#"{"check_id":"abc"}"#)
+        );
+        // 保留策略：30天内的数据不会被清理
+        assert_eq!(repo.delete_older_than_days(30).unwrap(), 0);
+        // 负数天数表示截止时间在未来，全部清理
+        assert_eq!(repo.delete_older_than_days(-1).unwrap(), 1);
+        assert_eq!(repo.get_check_results(None, 1, 10).unwrap().1, 0);
+    }
+}

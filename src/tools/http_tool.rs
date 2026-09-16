@@ -126,3 +126,57 @@ pub fn parse_host_port(target: &str, default_port: u16) -> Option<(String, u16)>
         None => Some((authority.to_string(), default_port)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_host_port;
+
+    #[test]
+    fn bare_host_uses_default_port() {
+        assert_eq!(
+            parse_host_port("example.com", 80),
+            Some(("example.com".to_string(), 80))
+        );
+    }
+
+    #[test]
+    fn host_with_port_is_parsed() {
+        assert_eq!(
+            parse_host_port("example.com:8443", 80),
+            Some(("example.com".to_string(), 8443))
+        );
+    }
+
+    #[test]
+    fn protocol_prefix_and_path_are_stripped() {
+        assert_eq!(
+            parse_host_port("https://example.com:8443/path/to", 21),
+            Some(("example.com".to_string(), 8443))
+        );
+        assert_eq!(
+            parse_host_port("http://example.com", 8080),
+            Some(("example.com".to_string(), 8080))
+        );
+    }
+
+    #[test]
+    fn ipv6_with_port_is_parsed() {
+        assert_eq!(
+            parse_host_port("[::1]:53", 53),
+            Some(("[::1]".to_string(), 53))
+        );
+    }
+
+    #[test]
+    fn invalid_port_returns_none() {
+        assert_eq!(parse_host_port("example.com:not_a_port", 80), None);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        assert_eq!(
+            parse_host_port("  example.com:22  ", 22),
+            Some(("example.com".to_string(), 22))
+        );
+    }
+}

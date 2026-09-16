@@ -335,3 +335,183 @@ fn feishu_sign(timestamp: i64, secret: &str) -> String {
     mac.update(b"");
     BASE64_STANDARD.encode(mac.finalize().into_bytes())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{detail_summary, failure_reason, feishu_sign, is_target_available, AlertsEngine};
+    use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
+    use crate::tools_types::{
+        AlertRuleTypes, AlertSingleRule, AlertVerificationRules, BasicAvailability,
+        HttpMonitorResult, MonitorType, NotifyCondition, NotifyConfig,
+    };
+
+    // 构造HTTP类型的检查结果（其余字段走Default）
+    fn http_result(status: bool, reachable: bool, code: Option<u16>) -> CheckResult {
+        CheckResult {
+            id: 1,
+            monitor_type: MonitorType::Http,
+            target: Some("https://example.com".to_string()),
+            status,
+            details: CheckResultDetail::Http(HttpMonitorResult {
+                basic_avaliable: BasicAvailability {
+                    is_reachable: reachable,
+                    res_status_code: code,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn engine_with_rules(rules: Vec<AlertSingleRule>) -> AlertsEngine {
+        AlertsEngine::new(AlertVerificationRules {
+            notify_type: "FEISHU".to_string(),
+            notify_config: NotifyConfig {
+                webhook_url: "http://127.0.0.1:9".to_string(),
+                secret: None,
+            },
+            rules,
+        })
+    }
+
+    fn availability_rule() -> AlertSingleRule {
+        AlertSingleRule {
+            rule_type: AlertRuleTypes::Availability,
+            condition: NotifyCondition::default(),
+        }
+    }
+
+    fn response_code_rule(no_contains: Vec<u16>) -> AlertSingleRule {
+        AlertSingleRule {
+            rule_type: AlertRuleTypes::ResponseCode,
+            condition: NotifyCondition {
+                no_contains,
+                contains: vec![],
+                regex: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn availability_rule_triggers_on_unreachable() {
+        let engine = engine_with_rules(vec![availability_rule()]);
+        // 任务成功但目标不可达
+        assert!(engine.evaluate(&http_result(true, false, None)).is_some());
+    }
+
+    #[test]
+    fn availability_rule_silent_when_reachable() {
+        let engine = engine_with_rules(vec![availability_rule()]);
+        assert!(engine
+            .evaluate(&http_result(true, true, Some(200)))
+            .is_none());
+    }
+
+    #[test]
+    fn failed_task_counts_as_unavailable() {
+        let engine = engine_with_rules(vec![availability_rule()]);
+        assert!(engine.evaluate(&http_result(false, true, Some(200))).is_some());
+    }
+
+    #[test]
+    fn no_rules_never_triggers() {
+        let engine = engine_with_rules(vec![]);
+        assert!(engine.evaluate(&http_result(true, false, None)).is_none());
+    }
+
+    #[test]
+    fn response_code_rule_matches_no_contains() {
+        let engine = engine_with_rules(vec![response_code_rule(vec![200, 301])]);
+        assert!(engine.evaluate(&http_result(true, true, Some(500))).is_some());
+        assert!(engine
+            .evaluate(&http_result(true, true, Some(200)))
+            .is_none());
+    }
+
+    #[test]
+    fn request_failure_without_code_triggers_response_code_rule() {
+        let engine = engine_with_rules(vec![response_code_rule(vec![200])]);
+        // 拿不到响应码（请求失败）同样触发告警
+        assert!(engine.evaluate(&http_result(true, false, None)).is_some());
+    }
+
+    #[test]
+    fn response_code_rule_skipped_for_non_http_details() {
+        let engine = engine_with_rules(vec![response_code_rule(vec![200])]);
+        // ICMP结果没有响应码，RESPONSE_CODE规则直接跳过
+        let result = CheckResult {
+            id: 2,
+            monitor_type: MonitorType::Icmp,
+            target: Some("10.0.0.1".to_string()),
+            status: true,
+            details: CheckResultDetail::Icmp(IcmpMonitorResult {
+                is_alive: true,
+                elapsed_ms: 30,
+            }),
+        };
+        assert!(engine.evaluate(&result).is_none());
+    }
+
+    #[test]
+    fn availability_rule_applies_to_icmp() {
+        let engine = engine_with_rules(vec![availability_rule()]);
+        let down = CheckResult {
+            id: 3,
+            monitor_type: MonitorType::Icmp,
+            target: Some("10.0.0.1".to_string()),
+            status: true,
+            details: CheckResultDetail::Icmp(IcmpMonitorResult {
+                is_alive: false,
+                elapsed_ms: 30,
+            }),
+        };
+        assert!(!is_target_available(&down));
+        assert!(engine.evaluate(&down).is_some());
+    }
+
+    #[test]
+    fn system_monitors_available_when_task_ok() {
+        let result = CheckResult {
+            id: 4,
+            monitor_type: MonitorType::Cpu,
+            target: None,
+            status: true,
+            details: CheckResultDetail::Cpu(Default::default()),
+        };
+        assert!(is_target_available(&result));
+        assert!(engine_with_rules(vec![availability_rule()])
+            .evaluate(&result)
+            .is_none());
+    }
+
+    #[test]
+    fn feishu_sign_matches_reference_vector() {
+        // 参考向量由PowerShell HMACSHA256独立计算：key = "1712126400\ntest-secret"，消息为空
+        assert_eq!(
+            feishu_sign(1712126400, "test-secret"),
+            "BbGyLWSeiDDaf5+1ZZHc+miQjKW0aT9Rp/4iOd3ju5I="
+        );
+    }
+
+    #[test]
+    fn failure_reason_combines_kind_and_message() {
+        let mut r = HttpMonitorResult::default();
+        assert_eq!(failure_reason(&r), "未知原因");
+        r.error_kind = Some("timeout".to_string());
+        assert_eq!(failure_reason(&r), "timeout");
+        r.error_message = Some("boom".to_string());
+        assert_eq!(failure_reason(&r), "timeout: boom");
+        r.error_kind = None;
+        assert_eq!(failure_reason(&r), "boom");
+    }
+
+    #[test]
+    fn detail_summary_reports_status_code_and_elapsed() {
+        assert_eq!(
+            detail_summary(&http_result(true, true, Some(200)).details),
+            "状态码 200，耗时 0 ms"
+        );
+        let failed = http_result(false, false, None);
+        assert_eq!(detail_summary(&failed.details), "请求失败（未知原因）");
+    }
+}

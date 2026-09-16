@@ -112,3 +112,54 @@ impl MonitorRepository {
         diesel::delete(monitor_config::table.find(id)).execute(&mut conn)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MonitorConfigInsert, MonitorConfigUpdate, MonitorRepository};
+    use crate::database::connect_db::test_pool;
+    use std::sync::Arc;
+
+    fn insert(name: &str) -> MonitorConfigInsert {
+        MonitorConfigInsert {
+            name: Some(name.to_string()),
+            target: "https://a.com".to_string(),
+            method: Some("GET".to_string()),
+            monitor_type: "HTTP".to_string(),
+            interval_ms: Some(5000),
+            timeout_ms: 5000,
+            config_json: Some("{}".to_string()),
+            enabled: 1,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn monitor_crud_and_unique_name() {
+        let repo = MonitorRepository::new(Arc::new(test_pool(tempfile::tempdir().unwrap().path())));
+        // 创建并回读
+        let created = repo.create_monitor(&insert("t1")).unwrap();
+        assert_eq!(created.name.as_deref(), Some("t1"));
+        assert!(repo.find_by_name("t1").unwrap().is_some());
+        // name唯一约束：重复插入报错
+        assert!(repo.create_monitor(&insert("t1")).is_err());
+        // 更新启停状态
+        let update = MonitorConfigUpdate {
+            enabled: Some(0),
+            name: None,
+            target: None,
+            method: None,
+            monitor_type: None,
+            interval_ms: None,
+            timeout_ms: None,
+            config_json: None,
+            tag: None,
+        };
+        assert_eq!(repo.update_monitor(created.id, &update).unwrap(), 1);
+        let (list, total) = repo.get_monitors_by_enabled(false, 1, 10).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(list[0].id, created.id);
+        // 删除后不可再查到
+        assert_eq!(repo.delete_monitor(created.id).unwrap(), 1);
+        assert!(repo.get_monitor_by_id(created.id).unwrap().is_none());
+    }
+}

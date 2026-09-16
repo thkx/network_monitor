@@ -60,3 +60,39 @@ pub fn get_connection(pool: &SqlitePool) -> SqlitePooledConnection {
     let _ = conn.batch_execute("PRAGMA busy_timeout = 5000;");
     conn
 }
+
+// 测试辅助：在临时目录建库（自动跑迁移），测试结束随临时目录一起删除
+#[cfg(test)]
+pub fn test_pool(dir: &std::path::Path) -> SqlitePool {
+    let url = format!("file:///{}/test.db", dir.display().to_string().replace('\\', "/"));
+    let manager = ConnectionManager::<SqliteConnection>::new(url);
+    let pool = Pool::builder()
+        .max_size(4)
+        .connection_timeout(Duration::from_secs(10))
+        .build(manager)
+        .expect("测试连接池创建失败");
+    let mut conn = pool.get().expect("测试连接获取失败");
+    conn.run_pending_migrations(MIGRATIONS)
+        .expect("测试迁移执行失败");
+    pool
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_pool;
+    use crate::database::schema::monitor_config;
+    use diesel::prelude::*;
+
+    #[test]
+    fn pool_connects_and_migrations_apply() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = test_pool(dir.path());
+        let mut conn = super::get_connection(&pool);
+        // 迁移执行后monitor_config表应存在且为空
+        let count: i64 = monitor_config::table
+            .count()
+            .get_result(&mut conn)
+            .expect("查询应成功");
+        assert_eq!(count, 0);
+    }
+}
