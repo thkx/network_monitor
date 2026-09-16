@@ -12,7 +12,7 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; padding: 24px; }
-  .wrap { max-width: 1100px; margin: 0 auto; }
+  .wrap { max-width: 1150px; margin: 0 auto; }
   h1 { font-size: 20px; margin-bottom: 4px; }
   .sub { color: var(--muted); margin-bottom: 20px; }
   .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -47,6 +47,19 @@
   #resultOut { margin-top: 10px; font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; color: var(--muted); max-height: 300px; overflow: auto; }
   #runOut { margin-top: 10px; font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; }
   details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
+  #loginOverlay {
+    position: fixed; inset: 0; background: rgba(6, 10, 14, 0.85);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+  .login-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 28px; width: 320px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .login-card h2 { font-size: 16px; }
+  .login-card input {
+    background: #0d1117; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -59,6 +72,7 @@
     <button onclick="refresh(true)">手动刷新</button>
     <button onclick="togglePanel('newPanel')">＋ 新建监控</button>
     <span id="updated" class="muted"></span>
+    <button onclick="logout()" style="margin-left:auto">⎋ 退出登录</button>
   </div>
 
   <table id="statusTable">
@@ -95,6 +109,18 @@
   </div>
 </div>
 
+<!-- 登录浮层：任何数据请求返回401时弹出 -->
+<div id="loginOverlay" class="hidden">
+  <div class="login-card">
+    <h2>网络监控器 · 登录</h2>
+    <input id="loginUser" placeholder="用户名" autocomplete="username">
+    <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="primary" onclick="doLogin()">登录</button>
+    <div id="loginErr" class="err"></div>
+  </div>
+</div>
+
 <script>
 const API = {
   status:   '/api/status',
@@ -116,9 +142,42 @@ const EXAMPLE = {
 document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
 document.getElementById('newJson').value = JSON.stringify(EXAMPLE, null, 2);
 
+// 统一数据请求入口：401时弹出登录浮层（凭证由浏览器cookie自动携带）
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  if (r.status === 401) { showLogin(); throw new Error('需要登录'); }
+  return r;
+}
+
+function showLogin() { document.getElementById('loginOverlay').classList.remove('hidden'); }
+
+async function doLogin() {
+  const err = document.getElementById('loginErr');
+  err.textContent = '';
+  try {
+    const r = await fetch('/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('loginUser').value,
+        password: document.getElementById('loginPass').value,
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok) { err.textContent = j.message || ('HTTP ' + r.status); return; }
+    document.getElementById('loginOverlay').classList.add('hidden');
+    document.getElementById('loginPass').value = '';
+    refresh(false);
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function logout() {
+  try { await fetch('/logout', { method: 'POST' }); } catch (e) {}
+  showLogin();
+}
+
 async function refresh(notify) {
   try {
-    const r = await fetch(API.status);
+    const r = await api(API.status);
     const j = await r.json();
     if (j.code !== 200) throw new Error(j.message);
     render(j.data);
@@ -164,7 +223,7 @@ async function createMonitor() {
   errBox.textContent = '';
   try {
     const body = JSON.parse(document.getElementById('newJson').value);
-    const r = await fetch('/api/monitors', {
+    const r = await api('/api/monitors', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -183,7 +242,7 @@ async function runOnce(id) {
   panel.classList.remove('hidden');
   out.textContent = '执行中…';
   try {
-    const r = await fetch(API.run(id), { method: 'POST' });
+    const r = await api(API.run(id), { method: 'POST' });
     const j = await r.json();
     if (!r.ok) { out.textContent = `HTTP ${r.status}: ${JSON.stringify(j)}`; return; }
     const d = j.data;
@@ -202,7 +261,7 @@ async function showResults(id, name) {
   document.getElementById('resultsTitle').textContent = `检查结果 — ${name}`;
   panel.classList.remove('hidden');
   try {
-    const r = await fetch(API.results(id));
+    const r = await api(API.results(id));
     const j = await r.json();
     if (j.code !== 200) throw new Error(j.message);
     out.textContent = j.data.list.length === 0
@@ -214,13 +273,13 @@ async function showResults(id, name) {
 }
 
 async function toggle(id, enabled) {
-  await fetch(API.toggle(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !(enabled === 1) }) });
+  await api(API.toggle(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !(enabled === 1) }) });
   refresh(false);
 }
 
 async function removeMonitor(id) {
   if (!confirm(`确认删除监控 ${id}？其历史结果与告警状态将一并清除。`)) return;
-  await fetch(API.del(id), { method: 'DELETE' });
+  await api(API.del(id), { method: 'DELETE' });
   refresh(false);
 }
 

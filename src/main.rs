@@ -9,6 +9,10 @@ mod logging;
 mod metrics;
 use metrics::MetricsRegistry;
 
+// API认证模块（env凭证 + 内存会话 + actix中间件）
+mod auth;
+use auth::{Auth, AuthConfig, SessionStore};
+
 // 定时监控模块
 mod async_monitor;
 use async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
@@ -199,6 +203,14 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
     let scheduler = web::Data::new(Arc::new(Mutex::new(scheduler)));
 
     // 5. 启动Web API服务
+    // 认证：ADMIN_PASSWORD配置时启用会话认证，未配置时开放并明确WARN
+    let auth_config = Arc::new(AuthConfig::from_env());
+    if auth_config.enabled {
+        tracing::info!("API认证已启用 (user: {})", auth_config.username);
+    } else {
+        tracing::warn!("ADMIN_PASSWORD 未设置：API与控制台处于无认证状态，请勿暴露到公网");
+    }
+    let session_store = Arc::new(Mutex::new(SessionStore::new()));
     let metrics_for_app = metrics_registry.clone();
     let pool_for_app = pool.clone();
     match HttpServer::new(move || {
@@ -208,6 +220,9 @@ async fn run_server(port: u16, monitor_list: Vec<SelfDefineMonitorConfig>) {
             .app_data(web::Data::new(metrics_for_app.clone()))
             .app_data(web::Data::new(pool_for_app.clone()))
             .app_data(scheduler.clone())
+            .app_data(web::Data::new(session_store.clone()))
+            .app_data(web::Data::new(auth_config.clone()))
+            .wrap(Auth::new(session_store.clone(), auth_config.clone()))
             .configure(api::configure_routes)
     })
     .bind(("127.0.0.1", port))

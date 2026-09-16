@@ -1,15 +1,19 @@
 pub mod handles;
 
 use actix_web::web;
+use handles::auth_handlers;
 use handles::console_handlers;
 use handles::metrics_handlers;
 use handles::monitor_handlers;
 use handles::result_handlers;
 
 // 统一注册Web路由：
-//   / 控制台、/metrics Prometheus指标端点、/api/monitors 监控配置CRUD、/api/results 监控结果查询
+//   / 控制台、/login /logout 认证、/metrics 指标端点、/api/* 业务接口
+// （/login与控制台静态页在Auth中间件中放行；其余受会话保护）
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/", web::get().to(console_handlers::get_console));
+    cfg.route("/login", web::post().to(auth_handlers::login));
+    cfg.route("/logout", web::post().to(auth_handlers::logout));
     cfg.route("/metrics", web::get().to(metrics_handlers::get_metrics));
     cfg.service(
         web::scope("/api")

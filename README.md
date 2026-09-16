@@ -117,6 +117,18 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | `DATABASE_URL`          | `./db/monitor.db` | SQLite 数据库路径                      |
 | `RESULT_RETENTION_DAYS` | `30`              | 监控结果保留天数（每 24 小时清理一次） |
 | `RUST_LOG`              | `info`            | 日志级别（trace/debug/info/warn/error，支持按模块覆盖） |
+| `ADMIN_USER`            | `admin`           | 登录用户名                             |
+| `ADMIN_PASSWORD`        | （空=不启用认证） | 设置后启用登录认证，强烈建议配置       |
+| `METRICS_TOKEN`         | （空=metrics开放）| 配置后 `/metrics` 需要 `Bearer` 令牌   |
+
+## 认证
+
+- `ADMIN_PASSWORD` 设置后：除控制台静态页与 `/login` 外的所有路由要求登录
+  （HttpOnly 会话 cookie，12 小时有效，进程重启后需重新登录）
+- 登录失败按 IP 限流：连续 5 次失败锁定 60 秒
+- 密码比较使用 SHA-256 摘要常数时间对比；凭证仅存于环境变量，不落库
+- `/metrics`：配置 `METRICS_TOKEN` 后 Prometheus 需以 `bearer_token` 方式抓取：
+  `authorization: Bearer <METRICS_TOKEN>`；未配置时保持开放（导出器惯例，由部署者权衡）
 
 ## 日志
 
