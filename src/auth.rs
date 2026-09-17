@@ -163,6 +163,11 @@ impl Auth {
         if path == "/login" && req.method() == Method::POST {
             return None;
         }
+        // 控制台静态页放行：页面本身无敏感数据，401由页面JS请求/api/*时触发，
+        // 弹出登录浮层（否则HTML加载不出来，用户只能看到裸401 JSON）
+        if path == "/" && req.method() == Method::GET {
+            return None;
+        }
         // /metrics：未配置Token时开放（`?`在None时直接放行，导出器惯例）；
         // 配置了Token时接受正确Bearer
         if path == "/metrics" {
@@ -371,6 +376,28 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body = test::read_body(resp).await;
         assert_eq!(&body[..], b"secret-data");
+    }
+
+    #[actix_web::test]
+    async fn console_page_is_served_without_session() {
+        use actix_web::test;
+        use actix_web::web;
+
+        let store = Arc::new(Mutex::new(SessionStore::new()));
+        let app = test::init_service(
+            actix_web::App::new()
+                .wrap(Auth::new(store, config(true)))
+                .route("/", web::get().to(|| async { "<html>console</html>" })),
+        )
+        .await;
+        // 无cookie：控制台页放行（登录浮层由页面JS对/api/*的401触发）
+        let req = test::TestRequest::get().uri("/").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        // 登录接口放行后，其余API仍受保护
+        let req = test::TestRequest::get().uri("/api/monitors").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
     }
 
     #[actix_web::test]
