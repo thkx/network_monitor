@@ -166,10 +166,16 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
     let result_service_for_cleanup = result_service.clone();
     tokio::spawn(async move {
         loop {
-            match result_service_for_cleanup.delete_expired(retention_days) {
-                Ok(n) if n > 0 => tracing::info!("已清理 {} 天前的监控结果: {} 条", retention_days, n),
-                Ok(_) => {}
-                Err(e) => tracing::error!("清理过期监控结果失败: {}", e),
+            // 同步diesel DELETE挪到阻塞池执行，避免清理期间的SQLite写卡住runtime线程
+            let svc = result_service_for_cleanup.clone();
+            let days = retention_days;
+            match tokio::task::spawn_blocking(move || svc.delete_expired(days)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    tracing::info!("已清理 {} 天前的监控结果: {} 条", days, n)
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::error!("清理过期监控结果失败: {}", e),
+                Err(e) => tracing::error!("清理任务执行失败: {}", e),
             }
             tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
         }
@@ -180,12 +186,11 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
 
     // 3. 后台任务持续消费监控结果：写CSV日志 + 持久化到数据库 + 更新Prometheus指标
     // （告警检查已下沉到各监控任务）
+    // 句柄保留：优雅关停时等待消费者完成最终攒批落库
     let (tx, rx) = mpsc::channel::<MonitorResultMessage>(100);
     let result_service_for_loop = result_service.clone();
     let metrics_for_loop = metrics_registry.clone();
-    tokio::spawn(async move {
-        consume_results(result_service_for_loop, rx, metrics_for_loop).await;
-    });
+    let consumer_handle = tokio::spawn(consume_results(result_service_for_loop, rx, metrics_for_loop));
 
     // 4. 调度器加载启用配置并启动定时监控；API 增删改配置后可整体重建实现热更新
     let mut scheduler = Scheduler::new(pool.clone(), default_interval);
@@ -202,9 +207,25 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
         tracing::warn!("ADMIN_PASSWORD 未设置：API与控制台处于无认证状态，请勿暴露到公网");
     }
     let session_store = Arc::new(Mutex::new(SessionStore::new()));
+    // 会话/限流表周期清扫：过期会话与失效失败记录不残留，防内存无界增长
+    // （IPv6轮换等攻击制造的失败记录受attempts容量上限保护，见SessionStore::sweep）
+    let session_store_for_sweep = session_store.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            session_store_for_sweep
+                .lock()
+                .expect("session锁中毒")
+                .sweep();
+        }
+    });
     let metrics_for_app = metrics_registry.clone();
     let pool_for_app = pool.clone();
-    match HttpServer::new(move || {
+    // 先绑定并转成Server future：ServerHandle从Server获取（actix-web 4中HttpServer本身没有handle()）
+    // 关停段持有独立的Data克隆：HttpServer闭包move会接管scheduler本体
+    let scheduler_for_shutdown = scheduler.clone();
+    let server = match HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(monitor_service.clone()))
             .app_data(web::Data::new(result_service.clone()))
@@ -220,13 +241,57 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
     })
     .bind(("127.0.0.1", port))
     {
-        Ok(server) => {
-            tracing::info!("Web API 已启动: http://127.0.0.1:{}/api/monitors", port);
-            if let Err(e) = server.run().await {
-                tracing::error!("Web API 服务异常退出: {}", e);
+        Ok(srv) => srv.run(),
+        Err(e) => {
+            tracing::error!("Web API 端口 {} 绑定失败: {}", port, e);
+            return;
+        }
+    };
+    tracing::info!("Web API 已启动: http://127.0.0.1:{}/api/monitors", port);
+    // 优雅关停：监听退出信号（Ctrl+C / Unix SIGTERM），
+    // stop(true)让Server停止接受新请求并等待进行中的请求完成
+    let server_handle = server.handle();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("收到退出信号，开始优雅关停：停止接受新请求…");
+        server_handle.stop(true).await;
+    });
+    if let Err(e) = server.await {
+        tracing::error!("Web API 服务异常退出: {}", e);
+    }
+    // 服务器退出后：停止全部监控任务并释放调度器持有的发送端；
+    // 发送端全部drop后消费者的recv返回None，触发最终攒批落库后退出
+    if let Ok(mut sched) = scheduler_for_shutdown.lock() {
+        sched.shutdown();
+        tracing::info!("已停止全部定时监控任务");
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), consumer_handle).await {
+        Ok(_) => tracing::info!("结果消费者已完成最终落库，进程退出"),
+        Err(_) => tracing::warn!("等待消费者收尾超时（10s），强制退出"),
+    }
+}
+
+// 阻塞直到收到退出信号：Ctrl+C，Unix下另监听SIGTERM
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("无法监听SIGTERM（{}），仅Ctrl+C生效", e);
+                let _ = tokio::signal::ctrl_c().await;
             }
         }
-        Err(e) => tracing::error!("Web API 端口 {} 绑定失败: {}", port, e),
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -252,8 +317,8 @@ async fn consume_results(
         tokio::select! {
             message = rx.recv() => {
                 let Some(message) = message else {
-                    // 所有发送端关闭（进程退出路径）：清空余量后结束
-                    flush_batch(&result_service, &mut buffer);
+                    // 所有发送端关闭（优雅关停路径）：清空余量后结束
+                    flush_batch_async(&result_service, &mut buffer).await;
                     break;
                 };
                 // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
@@ -275,12 +340,12 @@ async fn consume_results(
                 if message.route.monitor_id.is_some() {
                     buffer.push(message);
                     if buffer.len() >= BATCH_MAX_ITEMS {
-                        flush_batch(&result_service, &mut buffer);
+                        flush_batch_async(&result_service, &mut buffer).await;
                     }
                 }
             }
             _ = flush_tick.tick() => {
-                flush_batch(&result_service, &mut buffer);
+                flush_batch_async(&result_service, &mut buffer).await;
             }
         }
     }
@@ -310,6 +375,28 @@ fn flush_batch(result_service: &ResultService, buffer: &mut Vec<MonitorResultMes
         }
     }
     buffer.clear();
+}
+
+// 攒批落库的异步包装：flush_batch内的批量INSERT是同步阻塞调用，
+// 在async消费者任务内直接执行会卡住runtime线程，挪到spawn_blocking阻塞池。
+// 缓冲区经mem::take移入阻塞任务再带回， Join失败（阻塞任务panic）时退化为空缓冲，
+// 数据不重复写入；CSV日志另有完整备份
+async fn flush_batch_async(
+    result_service: &ResultService,
+    buffer: &mut Vec<MonitorResultMessage>,
+) {
+    if buffer.is_empty() {
+        return;
+    }
+    let svc = result_service.clone();
+    let taken = std::mem::take(buffer);
+    *buffer = tokio::task::spawn_blocking(move || {
+        let mut buf = taken;
+        flush_batch(&svc, &mut buf);
+        buf
+    })
+    .await
+    .unwrap_or_default();
 }
 
 // 把JSON配置导入monitor_config表（name有唯一约束，按名称去重保证幂等）

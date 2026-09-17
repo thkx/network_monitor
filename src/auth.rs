@@ -18,6 +18,7 @@ use actix_web::http::Method;
 use actix_web::HttpResponse;
 use sha2::{Digest, Sha256};
 use std::future::{ready, Ready};
+use subtle::ConstantTimeEq;
 
 // 本地 boxed future别名：actix-web worker是单线程运行时，!Send future可用
 // （与actix_service的LocalBoxFuture同义，避免为此引入futures-util直接依赖）
@@ -29,6 +30,10 @@ pub const SESSION_COOKIE: &str = "monitor_session";
 // 登录限流：5次失败锁60秒
 const MAX_FAILURES: u32 = 5;
 const LOCKOUT_SECS: i64 = 60;
+// 失败记录保留窗口：未锁定且最后活动超过该时长的IP条目可被清扫
+const ATTEMPT_IDLE_SECS: i64 = 600;
+// 限流追踪的IP容量上限：防IPv6轮换等 flood 把 attempts 撑爆内存
+const MAX_TRACKED_IPS: usize = 10_000;
 
 // 认证配置（进程启动时从环境变量读取一次）
 #[derive(Debug, Clone)]
@@ -38,6 +43,8 @@ pub struct AuthConfig {
     pub password_digest: [u8; 32],
     pub metrics_token: Option<String>,
     pub enabled: bool,
+    // 会话cookie附加Secure标志（COOKIE_SECURE=1/true，HTTPS部署时开启）
+    pub cookie_secure: bool,
 }
 
 impl AuthConfig {
@@ -45,6 +52,9 @@ impl AuthConfig {
         let username = std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
         let password = std::env::var("ADMIN_PASSWORD").unwrap_or_default();
         let enabled = !password.is_empty();
+        let cookie_secure = std::env::var("COOKIE_SECURE")
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
         AuthConfig {
             username,
             password_digest: sha256(&password),
@@ -52,6 +62,7 @@ impl AuthConfig {
                 .ok()
                 .filter(|t| !t.is_empty()),
             enabled,
+            cookie_secure,
         }
     }
 
@@ -60,8 +71,9 @@ impl AuthConfig {
         if !self.enabled {
             return false;
         }
-        let user_match = sha256(username) == sha256(&self.username);
-        let pass_match = sha256(password) == self.password_digest;
+        // [u8;32]的==是可短路的逐元素比较，并非保证常数时间；摘要对比用subtle的ct_eq
+        let user_match: bool = sha256(username).ct_eq(&sha256(&self.username)).into();
+        let pass_match: bool = sha256(password).ct_eq(&self.password_digest).into();
         // 两个比较都执行，避免"用户名对了才比密码"的分支时序差异
         user_match && pass_match
     }
@@ -71,8 +83,18 @@ impl AuthConfig {
 #[derive(Debug, Default)]
 pub struct SessionStore {
     sessions: HashMap<String, (String, i64)>,
-    // 登录失败限流：ip -> (连续失败次数, 锁定截止时间unix秒)
-    attempts: HashMap<IpAddr, (u32, i64)>,
+    // 登录失败限流：ip -> (连续失败次数, 最后活动unix秒, 锁定截止unix秒)
+    attempts: HashMap<IpAddr, (u32, i64, i64)>,
+}
+
+// 单次登录尝试的原子结果
+pub enum LoginOutcome {
+    // 锁定中：不再验证凭证，调用方回429
+    Locked,
+    // 凭证错误：已计入失败，调用方回401
+    BadCredentials,
+    // 成功：携带新会话id
+    Session(String),
 }
 
 impl SessionStore {
@@ -111,31 +133,64 @@ impl SessionStore {
         self.sessions.remove(sid);
     }
 
-    // 登录限流：锁定中返回false（调用方回429）
-    pub fn allow_attempt(&mut self, ip: Option<IpAddr>) -> bool {
-        let Some(ip) = ip else {
-            return true;
-        };
+    // 原子登录：限流检查、凭证验证、失败计数/会话创建在同一次加锁内完成。
+    // 旧实现"先检查(allow_attempt)后记录(record_failure)"分两次加锁，两者之间
+    // 不持锁，并发突发可在任何失败被计数前全部通过检查，5次上限被放大；
+    // 合并后各请求在互斥锁上串行化，上限对突发流量精确生效
+    pub fn login(
+        &mut self,
+        ip: Option<IpAddr>,
+        config: &AuthConfig,
+        username: &str,
+        password: &str,
+    ) -> LoginOutcome {
         let now = Self::now();
-        // 锁定截止时间未到：拒绝
-        !matches!(self.attempts.get(&ip), Some((_, until)) if *until > now)
-    }
-
-    pub fn record_failure(&mut self, ip: Option<IpAddr>) {
-        if let Some(ip) = ip {
-            let entry = self.attempts.entry(ip).or_insert((0, 0));
-            entry.0 += 1;
-            if entry.0 >= MAX_FAILURES {
-                // 锁定窗口重置计数：锁定结束后需重新累积5次
-                *entry = (0, Self::now() + LOCKOUT_SECS);
-            }
+        // 锁定截止时间未到：直接拒绝，不做凭证比较
+        if let Some(ip) = ip
+            && matches!(self.attempts.get(&ip), Some((_, _, until)) if *until > now)
+        {
+            return LoginOutcome::Locked;
         }
-    }
-
-    // 登录成功清零失败计数
-    pub fn clear_failures(&mut self, ip: Option<IpAddr>) {
+        if !config.verify(username, password) {
+            if let Some(ip) = ip {
+                let entry = self.attempts.entry(ip).or_insert((0, now, 0));
+                entry.0 += 1;
+                entry.1 = now;
+                if entry.0 >= MAX_FAILURES {
+                    // 锁定窗口重置计数：锁定结束后需重新累积5次
+                    *entry = (0, now, now + LOCKOUT_SECS);
+                }
+            }
+            return LoginOutcome::BadCredentials;
+        }
+        // 登录成功清零失败计数并建立会话
         if let Some(ip) = ip {
             self.attempts.remove(&ip);
+        }
+        LoginOutcome::Session(self.create(username))
+    }
+
+    // 周期清扫：过期会话 + 过期失败记录，防两个HashMap无界增长
+    // 由run_server的后台任务周期调用；validate的惰性清理仍保留（覆盖刚过期的热会话）
+    pub fn sweep(&mut self) {
+        let now = Self::now();
+        self.sessions.retain(|_, (_, expires)| *expires > now);
+        // 保留：锁定中（until未到）或仍有失败计数且最近有活动的条目
+        self.attempts.retain(|_, (fails, last, until)| {
+            *until > now || (*fails > 0 && now - *last < ATTEMPT_IDLE_SECS)
+        });
+        // 兜底容量上限：仍超限（如持续攻击制造海量新IP）时近似按最旧活动驱逐
+        if self.attempts.len() > MAX_TRACKED_IPS {
+            let excess = self.attempts.len() - MAX_TRACKED_IPS;
+            let mut by_last: Vec<(IpAddr, i64)> = self
+                .attempts
+                .iter()
+                .map(|(ip, (_, last, _))| (*ip, *last))
+                .collect();
+            by_last.sort_unstable_by_key(|(_, last)| *last);
+            for (ip, _) in by_last.into_iter().take(excess) {
+                self.attempts.remove(&ip);
+            }
         }
     }
 }
@@ -173,7 +228,7 @@ impl Auth {
         if path == "/metrics" {
             let expected = self.config.metrics_token.as_ref()?;
             if let Some(token) = bearer_token(req)
-                && sha256(&token) == sha256(expected)
+                && bool::from(sha256(&token).ct_eq(&sha256(expected)))
             {
                 return None;
             }
@@ -202,23 +257,25 @@ fn sha256(data: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-// 供handler构造会话cookie
-pub fn build_session_cookie(sid: &str) -> Cookie<'static> {
+// 供handler构造会话cookie；secure来自COOKIE_SECURE（HTTPS部署时开启）
+pub fn build_session_cookie(sid: &str, secure: bool) -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE, sid.to_string())
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
         .max_age(CookieDuration::seconds(SESSION_TTL_SECS))
+        .secure(secure)
         .finish()
 }
 
-// 供handler构造清除cookie（登出）
-pub fn build_expired_cookie() -> Cookie<'static> {
+// 供handler构造清除cookie（登出）；属性需与下发时一致才能可靠删除
+pub fn build_expired_cookie(secure: bool) -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE, "")
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
         .max_age(CookieDuration::ZERO)
+        .secure(secure)
         .finish()
 }
 
@@ -281,7 +338,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Auth, AuthConfig, SessionStore, SESSION_COOKIE};
+    use super::{
+        Auth, AuthConfig, LoginOutcome, SessionStore, SESSION_COOKIE, ATTEMPT_IDLE_SECS,
+        MAX_TRACKED_IPS,
+    };
+    use std::net::IpAddr;
     use std::sync::{Arc, Mutex};
 
     fn config(enabled: bool) -> Arc<AuthConfig> {
@@ -290,6 +351,7 @@ mod tests {
             password_digest: super::sha256("s3cret"),
             metrics_token: None,
             enabled,
+            cookie_secure: false,
         })
     }
 
@@ -326,21 +388,122 @@ mod tests {
     #[test]
     fn login_lockout_after_max_failures() {
         let mut store = SessionStore::new();
+        let cfg = config(true);
         let ip = Some("192.168.1.9".parse().unwrap());
-        for _ in 0..4 {
-            assert!(store.allow_attempt(ip));
-            store.record_failure(ip);
+        // 5次错误凭证：均返回BadCredentials并计数
+        for i in 0..5 {
+            assert!(
+                matches!(
+                    store.login(ip, &cfg, "admin", "wrong"),
+                    LoginOutcome::BadCredentials
+                ),
+                "第{}次错误凭证应为BadCredentials",
+                i + 1
+            );
         }
-        // 第5次失败触发锁定
-        assert!(store.allow_attempt(ip));
-        store.record_failure(ip);
-        assert!(!store.allow_attempt(ip), "5次失败后应锁定");
-        // 成功登录清零
-        store.clear_failures(ip);
-        assert!(store.allow_attempt(ip));
+        // 第6次起锁定：即使凭证正确也在验证前拒绝（防爆破语义）
+        assert!(
+            matches!(store.login(ip, &cfg, "admin", "wrong"), LoginOutcome::Locked),
+            "5次失败后应锁定"
+        );
+        assert!(
+            matches!(store.login(ip, &cfg, "admin", "s3cret"), LoginOutcome::Locked),
+            "锁定期间正确凭证也应拒绝"
+        );
         // 不同IP互不影响
         let other = Some("10.0.0.1".parse().unwrap());
-        assert!(store.allow_attempt(other));
+        assert!(matches!(
+            store.login(other, &cfg, "admin", "s3cret"),
+            LoginOutcome::Session(_)
+        ));
+    }
+
+    #[test]
+    fn successful_login_clears_failure_counter() {
+        let mut store = SessionStore::new();
+        let cfg = config(true);
+        let ip = Some("192.168.1.9".parse().unwrap());
+        for _ in 0..4 {
+            let _ = store.login(ip, &cfg, "admin", "wrong");
+        }
+        // 第5次直接成功：计数清零，不触发锁定
+        assert!(matches!(
+            store.login(ip, &cfg, "admin", "s3cret"),
+            LoginOutcome::Session(_)
+        ));
+        // 清零后重新累积，不受旧计数波及
+        for _ in 0..4 {
+            let _ = store.login(ip, &cfg, "admin", "wrong");
+        }
+        assert!(matches!(
+            store.login(ip, &cfg, "admin", "s3cret"),
+            LoginOutcome::Session(_)
+        ));
+    }
+
+    #[test]
+    fn sweep_removes_expired_sessions_and_stale_attempts() {
+        let mut store = SessionStore::new();
+        let cfg = config(true);
+        // 未过期会话：sweep保留
+        let sid = store.create("admin");
+        store.sweep();
+        assert!(store.validate(&sid));
+        // 已过期会话：sweep清理
+        let now = chrono::Utc::now().timestamp();
+        store
+            .sessions
+            .insert(sid.clone(), ("admin".to_string(), now - 1));
+        store.sweep();
+        assert!(!store.sessions.contains_key(&sid), "过期会话应被清扫");
+        // 锁定中的IP：sweep保留
+        let locked: IpAddr = "10.0.0.1".parse().unwrap();
+        for _ in 0..5 {
+            let _ = store.login(Some(locked), &cfg, "admin", "wrong");
+        }
+        store.sweep();
+        assert!(
+            store.attempts.contains_key(&locked),
+            "锁定中的条目不应被清扫"
+        );
+        // 有少量失败、但最后活动已超过保留窗口的IP：sweep清理
+        let idle: IpAddr = "10.0.0.2".parse().unwrap();
+        let _ = store.login(Some(idle), &cfg, "admin", "wrong");
+        store.attempts.get_mut(&idle).unwrap().1 = now - ATTEMPT_IDLE_SECS - 1;
+        store.sweep();
+        assert!(
+            !store.attempts.contains_key(&idle),
+            "过期且未锁定的失败记录应被清扫"
+        );
+    }
+
+    #[test]
+    fn sweep_caps_tracked_ips_under_flood() {
+        let mut store = SessionStore::new();
+        let cfg = config(true);
+        // 制造超上限的失败条目（模拟IPv6轮换flood）
+        for i in 0..(MAX_TRACKED_IPS as u32 + 100) {
+            let ip = IpAddr::from([10u8, 0, (i / 256) as u8, (i % 256) as u8]);
+            let _ = store.login(Some(ip), &cfg, "admin", "wrong");
+        }
+        store.sweep();
+        assert!(
+            store.attempts.len() <= MAX_TRACKED_IPS,
+            "清扫后条目数应回到上限内: {}",
+            store.attempts.len()
+        );
+    }
+
+    #[test]
+    fn session_cookie_honors_secure_flag() {
+        let secure = super::build_session_cookie("abc", true);
+        assert_eq!(secure.secure(), Some(true));
+        assert_eq!(secure.http_only(), Some(true));
+        let plain = super::build_session_cookie("abc", false);
+        assert_eq!(plain.secure(), Some(false));
+        let expired = super::build_expired_cookie(true);
+        assert_eq!(expired.secure(), Some(true));
+        assert_eq!(expired.max_age(), Some(actix_web::cookie::time::Duration::ZERO));
     }
 
     #[actix_web::test]
@@ -429,6 +592,7 @@ mod tests {
             password_digest: super::sha256("s3cret"),
             metrics_token: Some("tok-123".to_string()),
             enabled: true,
+            cookie_secure: false,
         });
         let app = test::init_service(
             actix_web::App::new()

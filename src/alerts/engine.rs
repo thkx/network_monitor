@@ -58,12 +58,21 @@ impl AlertsEngine {
         engine
     }
 
-    // 保存抑制状态（有持久化时）；失败只打日志，不影响告警主流程
-    fn persist_state(&self, alerting: bool) {
-        if let Some((repo, monitor_id)) = &self.state
-            && let Err(e) = repo.set_alerting(*monitor_id, alerting)
-        {
-            tracing::error!("保存告警状态失败 (monitor_id={}): {}", monitor_id, e);
+    // 保存抑制状态（有持久化时）；失败只打日志，不影响告警主流程。
+    // diesel的SQLite写是同步阻塞调用，挪到spawn_blocking阻塞池执行，
+    // 避免监控任务所在的runtime线程被DB写延迟卡住
+    async fn persist_state(&self, alerting: bool) {
+        let Some((repo, monitor_id)) = &self.state else {
+            return;
+        };
+        let repo = repo.clone();
+        let monitor_id = *monitor_id;
+        match tokio::task::spawn_blocking(move || repo.set_alerting(monitor_id, alerting)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!("保存告警状态失败 (monitor_id={}): {}", monitor_id, e)
+            }
+            Err(e) => tracing::error!("保存告警状态任务失败 (monitor_id={}): {}", monitor_id, e),
         }
     }
 
@@ -82,7 +91,7 @@ impl AlertsEngine {
                     self.notify.send_alert_message(message).await;
                     self.alerting = true;
                     self.hit_streak = 0;
-                    self.persist_state(true);
+                    self.persist_state(true).await;
                 }
             }
             // 未命中任何规则视为正常：连续正常达到阈值时发送一次恢复通知
@@ -101,7 +110,7 @@ impl AlertsEngine {
                         .await;
                     self.alerting = false;
                     self.ok_streak = 0;
-                    self.persist_state(false);
+                    self.persist_state(false).await;
                 }
             }
         }

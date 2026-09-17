@@ -72,6 +72,15 @@ impl Scheduler {
         }
     }
 
+    // 优雅关停：停止全部监控任务并释放调度器持有的发送端。
+    // 发送端全部drop后，结果消费者的recv返回None，触发最终攒批落库后退出
+    pub fn shutdown(&mut self) {
+        for (_id, handle) in self.tasks.drain() {
+            handle.abort();
+        }
+        self.tx = None;
+    }
+
     // 把一条数据库配置变成常驻监控任务
     fn spawn_one(&mut self, row: MonitorConfigModel, tx: mpsc::Sender<MonitorResultMessage>) {
         // config_json保存了完整的原始配置，反序列化后复用统一的构建逻辑

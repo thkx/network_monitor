@@ -91,6 +91,22 @@ pub async fn get_monitor_by_id(
     }
 }
 
+// 热更新重建：reload_all内含同步diesel查询（从库加载启用配置），
+// 统一挪到actix阻塞线程池执行，避免SQLite读写在worker线程上卡顿
+async fn reload_scheduler(
+    scheduler: &web::Data<Arc<Mutex<Scheduler>>>,
+    monitor_service: &MonitorService,
+) {
+    let sched = Arc::clone(scheduler);
+    let svc = monitor_service.clone();
+    let _ = web::block(move || {
+        if let Ok(mut s) = sched.lock() {
+            s.reload_all(&svc);
+        }
+    })
+    .await;
+}
+
 // 新增监控配置：请求体与monitor_list.json中单个监控配置对象结构一致，方便页面配置
 pub async fn create_monitor(
     monitor_service: web::Data<MonitorService>,
@@ -105,7 +121,7 @@ pub async fn create_monitor(
         actix_web::error::ErrorConflict(format!("Failed to create monitor: {}", e))
     })?;
     // 热更新：整体重建监控任务，让新配置立即生效（无需重启进程）
-    scheduler.lock().unwrap().reload_all(&monitor_service);
+    reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "created".to_string(),
@@ -154,7 +170,7 @@ pub async fn update_monitor(
         )));
     }
     // 热更新：重建监控任务，让新配置立即生效
-    scheduler.lock().unwrap().reload_all(&monitor_service);
+    reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "updated".to_string(),
@@ -179,7 +195,7 @@ pub async fn delete_monitor(
         )));
     }
     // 热更新：重建监控任务，被删除的监控随之停止
-    scheduler.lock().unwrap().reload_all(&monitor_service);
+    reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "deleted".to_string(),
@@ -210,7 +226,7 @@ pub async fn update_monitor_enabled(
             id
         )));
     }
-    scheduler.lock().unwrap().reload_all(&monitor_service);
+    reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "updated".to_string(),

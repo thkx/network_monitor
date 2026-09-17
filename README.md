@@ -128,8 +128,9 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 - `ADMIN_PASSWORD` 设置后：除控制台静态页与 `/login` 外的所有路由要求登录
   （HttpOnly 会话 cookie，12 小时有效，进程重启后需重新登录）
-- 登录失败按 IP 限流：连续 5 次失败锁定 60 秒
-- 密码比较使用 SHA-256 摘要常数时间对比；凭证仅存于环境变量，不落库
+- 登录失败按 IP 限流：连续 5 次失败锁定 60 秒（限流检查与失败计数在同一次加锁内原子完成，并发突发不会放大上限；失败记录定期清扫并有容量上限）
+- 密码比较使用 SHA-256 摘要常数时间对比（subtle）；凭证仅存于环境变量，不落库
+- 会话 cookie 为 HttpOnly + SameSite=Lax；`COOKIE_SECURE=1` 时附加 Secure 标志（HTTPS 部署时开启）
 - `/metrics`：配置 `METRICS_TOKEN` 后 Prometheus 需以 `bearer_token` 方式抓取：
   `authorization: Bearer <METRICS_TOKEN>`；未配置时保持开放（导出器惯例，由部署者权衡）
 
@@ -203,6 +204,7 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 - **攒批落库**：消费者满 64 条或首个待写结果等待超 1 秒，即以单条多行 INSERT 落库——写锁次数降为批次级，高监控数下避免逐条小事务的锁竞争；批量失败自动降级逐条写入（CSV 日志另有完整备份）
 - **WAL 模式**：读写不互斥，配合 busy_timeout 5s 与 foreign_keys 级联删除
 - **保留策略**：每 24 小时清理 `RESULT_RETENTION_DAYS` 天前的过期结果
+- **优雅关停**：Ctrl+C / SIGTERM 后停止接受请求、停掉全部监控任务并完成最终攒批落库（同步 DB 调用均在阻塞线程池执行，不卡 runtime）
 
 ## 开发
 

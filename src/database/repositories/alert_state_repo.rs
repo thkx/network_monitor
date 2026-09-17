@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 // 告警抑制状态仓库：持久化每个监控的"已告警未恢复"标志
 // 告警引擎（AlertsEngine）作为领域组件直接使用本仓库，无需再包一层Service
+// Clone仅复制Arc句柄，供persist_state挪入spawn_blocking使用
+#[derive(Clone)]
 pub struct AlertStateRepository {
     pool: Arc<SqlitePool>,
 }
