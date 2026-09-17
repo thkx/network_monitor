@@ -118,11 +118,13 @@ async fn reload_scheduler(
 pub async fn create_monitor(
     monitor_service: web::Data<MonitorService>,
     scheduler: web::Data<Arc<Mutex<Scheduler>>>, // 配置变更后重建监控任务（热更新）
+    default_interval: web::Data<u64>,            // interval未配置时的缺省间隔（与调度器同源）
     body: web::Json<SelfDefineMonitorConfig>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let entry = body.into_inner();
     validate_config(&entry)?;
-    let insert: MonitorConfigInsert = build_monitor_insert(&entry);
+    let insert: MonitorConfigInsert =
+        build_monitor_insert(&entry, Arc::unwrap_or_clone(default_interval.into_inner()));
     let created = match monitor_service.create_monitor(&insert) {
         Ok(c) => c,
         Err(e) => {
@@ -160,6 +162,7 @@ pub async fn create_monitor(
 pub async fn update_monitor(
     monitor_service: web::Data<MonitorService>,
     scheduler: web::Data<Arc<Mutex<Scheduler>>>,
+    default_interval: web::Data<u64>, // interval未配置时的缺省间隔（与调度器同源）
     path: web::Path<i32>,
     body: web::Json<SelfDefineMonitorConfig>,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -181,15 +184,39 @@ pub async fn update_monitor(
         target: Some(target),
         method,
         monitor_type: Some(entry.monitor_type.to_string()),
-        interval_ms: Some((entry.interval.unwrap_or(5) * 1000) as i32),
+        interval_ms: Some(
+            (entry.interval.unwrap_or(Arc::unwrap_or_clone(default_interval.into_inner())) * 1000)
+                as i32,
+        ),
         timeout_ms: Some(entry.timeout.unwrap_or(5000) as i32),
         config_json: serde_json::to_string(&entry).ok(),
         enabled: None, // 更新时保持启用状态不变
         tag: None,
     };
-    let affected = monitor_service
-        .update_monitor(id, &update)
-        .map_err(internal_error)?;
+    let affected = match monitor_service.update_monitor(id, &update) {
+        Ok(n) => n,
+        Err(e) => {
+            // 与create镜像：仅唯一约束冲突（name重复）返回409便于前端提示，
+            // 其余服务端故障归500避免误导调用方重试
+            if matches!(
+                &e,
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                )
+            ) {
+                return Ok(HttpResponse::Conflict().json(DefaultResponseObj {
+                    code: 409,
+                    message: format!(
+                        "监控名称已存在: {}（按target/类型生成，请先删除同名配置）",
+                        crate::tools_types::display_name(&entry)
+                    ),
+                    data: serde_json::Value::Null,
+                }));
+            }
+            return Err(internal_error(e));
+        }
+    };
     if affected == 0 {
         return Err(actix_web::error::ErrorNotFound(format!(
             "Monitor {} not found",
@@ -601,6 +628,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(web::Data::new(monitor_service.clone()))
                 .app_data(web::Data::new(scheduler.clone()))
+                .app_data(web::Data::new(5u64)) // create_monitor提取缺省间隔
                 .route("/api/monitors", web::post().to(create_monitor)),
         )
         .await;
@@ -620,6 +648,87 @@ mod tests {
         // 现在只有UniqueViolation返回409，但此用例验证正向路径仍然正确）
         let resp = actix_web::test::call_service(&app, send(body)).await;
         assert_eq!(resp.status(), 409, "重复创建应返回409");
+        let err: DefaultResponseObj<serde_json::Value> =
+            actix_web::test::read_body_json(resp).await;
+        assert!(err.message.contains("已存在"), "错误消息应指明名称冲突");
+    }
+
+    // 缺省间隔落库一致性 + 更新撞名409：
+    // create/update两条DB写路径的interval缺省值此前硬编码5（A1统一间隔时漏网），
+    // 现在与调度器from_entry同源（app_data注入）；update撞名此前映射500，现镜像create的409
+    #[actix_web::test]
+    async fn update_paths_use_default_interval_and_409() {
+        use super::{DefaultResponseObj, create_monitor, update_monitor};
+        use actix_web::web;
+        use crate::database::connect_db::test_pool;
+        use crate::database::repositories::monitor_repo::MonitorRepository;
+        use crate::database::services::monitor_service::MonitorService;
+        use crate::scheduler::Scheduler;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        let scheduler = Arc::new(Mutex::new(Scheduler::new(pool.clone(), 5)));
+
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(monitor_service.clone()))
+                .app_data(web::Data::new(scheduler.clone()))
+                .app_data(web::Data::new(7u64)) // 服务端缺省间隔=7秒
+                .route("/api/monitors", web::post().to(create_monitor))
+                .route("/api/monitors/{id}", web::put().to(update_monitor)),
+        )
+        .await;
+
+        // 创建时不带interval：DB列应写服务端缺省7秒（此前硬编码5）
+        let body = r#"{"target":"https://a.example.com","monitor_type":"HTTP"}"#;
+        let send_post = |uri: &'static str, body: &'static str| {
+            actix_web::test::TestRequest::post()
+                .uri(uri)
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(body.to_string())
+                .to_request()
+        };
+        let resp = actix_web::test::call_service(&app, send_post("/api/monitors", body)).await;
+        assert_eq!(resp.status(), 200, "创建应成功");
+        let row = monitor_service.find_by_name("https://a.example.com")
+            .expect("查询应成功")
+            .expect("应存在");
+        assert_eq!(row.interval_ms, Some(7000), "缺省interval应取app_data注入的7秒");
+
+        // 更新同样不带interval：DB列应保持服务端缺省，而非被重置成硬编码5
+        let resp = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::put()
+                .uri(&format!("/api/monitors/{}", row.id))
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(body.to_string())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "更新应成功");
+        let row = monitor_service.find_by_name("https://a.example.com")
+            .expect("查询应成功")
+            .expect("应存在");
+        assert_eq!(row.interval_ms, Some(7000), "更新后缺省interval不应被重置");
+
+        // 更新撞名：把另一个监控的target改成与a重复 → UniqueViolation → 409（此前500）
+        let _ = actix_web::test::call_service(
+            &app,
+            send_post("/api/monitors", r#"{"target":"https://b.example.com","monitor_type":"HTTP"}"#),
+        )
+        .await;
+        let resp = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::put()
+                .uri(&format!("/api/monitors/{}", row.id))
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(r#"{"target":"https://b.example.com","monitor_type":"HTTP"}"#.to_string())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 409, "更新撞名应返回409");
         let err: DefaultResponseObj<serde_json::Value> =
             actix_web::test::read_body_json(resp).await;
         assert!(err.message.contains("已存在"), "错误消息应指明名称冲突");

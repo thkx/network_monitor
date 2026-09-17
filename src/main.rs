@@ -155,7 +155,7 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
     let result_service = ResultService::new(CheckResultRepository::new(pool.clone()));
 
     // 2. 将 monitor_list.json 中的配置导入数据库（按名称去重，幂等）
-    import_monitor_list(&monitor_service, &monitor_list);
+    import_monitor_list(&monitor_service, &monitor_list, default_interval);
 
     // 2.5 数据保留策略：启动时清理一次过期监控结果，此后每24小时重复
     // 保留天数通过环境变量 RESULT_RETENTION_DAYS 配置（.env），默认30天
@@ -400,13 +400,13 @@ async fn flush_batch_async(
 }
 
 // 把JSON配置导入monitor_config表（name有唯一约束，按名称去重保证幂等）
-fn import_monitor_list(monitor_service: &MonitorService, monitor_list: &[SelfDefineMonitorConfig]) {
+fn import_monitor_list(monitor_service: &MonitorService, monitor_list: &[SelfDefineMonitorConfig], default_interval: u64) {
     for entry in monitor_list {
         let name = display_name(entry);
         match monitor_service.find_by_name(&name) {
             Ok(Some(_)) => continue, // 已存在，跳过
             Ok(None) => {
-                let insert = build_monitor_insert(entry);
+                let insert = build_monitor_insert(entry, default_interval);
                 match monitor_service.create_monitor(&insert) {
                     Ok(_) => tracing::info!("监控配置已导入: {}", name),
                     Err(e) => tracing::error!("监控配置导入失败 {}: {}", name, e),
