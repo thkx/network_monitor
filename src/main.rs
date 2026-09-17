@@ -64,8 +64,8 @@ async fn main() {
     // 初始化结构化日志（级别RUST_LOG，文件输出logs/按日滚动）；Guard保活到main结束以刷新文件缓冲
     let _log_guard = logging::init();
     tracing::info!("网络监控器 启动...");
-    // 初始化日志结构体
-    let logger = CsvLogger::new("monitor_log.csv");
+    // 初始化日志结构体（CSV路径可用CSV_PATH覆盖，容器部署指向持久卷）
+    let logger = CsvLogger::new(&csv_log_path());
     // 获取待监控的列表（JSON配置文件，每个监控引擎的参数都是一个对象，方便后续通过页面来配置）
     let monitor_list = read_monitor_list("monitor_list.json");
     // 获取命令行参数
@@ -306,7 +306,7 @@ async fn consume_results(
     mut rx: mpsc::Receiver<MonitorResultMessage>,
     metrics: Arc<Mutex<MetricsRegistry>>,
 ) {
-    let logger = CsvLogger::new("monitor_log.csv");
+    let logger = CsvLogger::new(&csv_log_path());
     let mut buffer: Vec<MonitorResultMessage> = Vec::with_capacity(BATCH_MAX_ITEMS);
     let mut flush_tick =
         tokio::time::interval(std::time::Duration::from_millis(BATCH_FLUSH_MILLIS));
@@ -453,6 +453,11 @@ fn log_result(logger: &CsvLogger, name: &str, result: &CheckResult) {
             "检查完成：不可用"
         );
     }
+}
+
+// CSV日志路径：环境变量CSV_PATH覆盖，缺省当前目录（容器部署应指向持久卷）
+fn csv_log_path() -> String {
+    std::env::var("CSV_PATH").unwrap_or_else(|_| "monitor_log.csv".to_string())
 }
 
 // 获取监控的列表（从JSON配置文件读取，每个监控引擎的参数都是一个对象）

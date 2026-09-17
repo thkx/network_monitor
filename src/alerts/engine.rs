@@ -10,7 +10,8 @@ use super::notify::NotifyEngine;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::monitor::types::{CheckResult, CheckResultDetail};
 use crate::tools_types::{
-    AlertRuleTypes, AlertVerificationRules, HttpMonitorResult, NotifyCondition,
+    AlertRuleTypes, AlertVerificationRules, ContentVerificationRules, HttpMonitorResult,
+    NotifyCondition,
 };
 use regex::Regex;
 
@@ -151,7 +152,11 @@ impl AlertsEngine {
                     }
                 }
                 AlertRuleTypes::Content => {
-                    // 内容匹配规则（预留）
+                    // 内容匹配规则（仅HTTP）：内容校验存在未命中项时告警。
+                    // 与AVAILABILITY正交——内容校验失败不影响可达性判定，由本规则单独负责
+                    if let Some(message) = evaluate_content(&target, check_result) {
+                        return Some(message);
+                    }
                 }
             }
         }
@@ -230,6 +235,37 @@ fn is_target_available(check_result: &CheckResult) -> bool {
         | CheckResultDetail::Process(_) => true,
         CheckResultDetail::Unknown(_) => false,
     }
+}
+
+// 内容匹配规则评估（仅HTTP有意义）：内容校验存在未命中项时返回告警消息
+// 依赖HTTP监控已执行的content_evaluation_rules结果——监控本身未配置内容规则时，
+// failed_rules恒为空，本规则静默跳过（不会把"没配规则"当成"内容异常"）
+fn evaluate_content(target: &str, check_result: &CheckResult) -> Option<String> {
+    let CheckResultDetail::Http(ref http_result) = check_result.details else {
+        return None;
+    };
+    let failed = &http_result.content_verification.failed_rules;
+    if failed.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = failed
+        .iter()
+        .map(|r| {
+            let type_name = match r.rules.rule_type {
+                ContentVerificationRules::Contains => "contains",
+                ContentVerificationRules::NotContains => "not_contains",
+                ContentVerificationRules::Regex => "regex",
+                ContentVerificationRules::Default => "default",
+            };
+            format!("{}({})", type_name, r.rules.rule_content)
+        })
+        .collect();
+    Some(format!(
+        "[监控告警] target: {} | 内容校验失败 {} 项: {}",
+        target,
+        failed.len(),
+        names.join("、")
+    ))
 }
 
 // 阈值规则评估（CPU/内存/磁盘/进程有意义）：数值越限返回告警消息
@@ -338,7 +374,8 @@ mod tests {
     };
     use crate::tools_types::{
         AlertRuleTypes, AlertSingleRule, AlertVerificationRules, BasicAvailability,
-        HttpMonitorResult, MonitorType, NotifyCondition, NotifyConfig, ThresholdCondition,
+        ContentVerificationRules, HttpMonitorResult, MonitorType, NotifyCondition, NotifyConfig,
+        ThresholdCondition,
     };
 
     // 构造HTTP类型的检查结果（其余字段走Default）
@@ -369,6 +406,7 @@ mod tests {
             notify_config: NotifyConfig {
                 webhook_url: "http://127.0.0.1:9".to_string(),
                 secret: None,
+                email: None,
             },
             rules,
             consecutive_failures: failures,
@@ -674,5 +712,73 @@ mod tests {
             None,
         );
         assert!(engine.evaluate(&cpu_result(99.0)).is_none());
+    }
+
+    // ---- CONTENT 内容匹配规则 ----
+
+    fn http_with_content(failed_rules: Vec<ContentVerificationRulesResultAlias>) -> CheckResult {
+        let mut result = http_result(true, true, Some(200));
+        if let CheckResultDetail::Http(ref mut r) = result.details {
+            r.content_verification.failed_rules = failed_rules;
+        }
+        result
+    }
+
+    // 别名避免直接依赖crate::tools_types的完整路径（ContentVerificationRulesResult）
+    type ContentVerificationRulesResultAlias = crate::tools_types::ContentVerificationRulesResult;
+
+    fn failed_rule(kind: ContentVerificationRules, content: &str) -> ContentVerificationRulesResultAlias {
+        ContentVerificationRulesResultAlias {
+            rules: crate::tools_types::ContentVerificationRulesSingle {
+                rule_type: kind,
+                rule_content: content.to_string(),
+                rule_description: String::new(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn content_rule_triggers_on_failed_verification() {
+        let engine = engine_with_rules(vec![AlertSingleRule {
+            rule_type: AlertRuleTypes::Content,
+            condition: NotifyCondition::default(),
+        }]);
+        let result = http_with_content(vec![failed_rule(
+            ContentVerificationRules::Contains,
+            "expected-text",
+        )]);
+        let msg = engine.evaluate(&result).expect("内容校验失败应告警");
+        assert!(msg.contains("contains(expected-text)"), "消息应含规则明细: {msg}");
+        assert!(msg.contains("内容校验失败 1 项"));
+    }
+
+    #[test]
+    fn content_rule_silent_when_all_matched() {
+        let engine = engine_with_rules(vec![AlertSingleRule {
+            rule_type: AlertRuleTypes::Content,
+            condition: NotifyCondition::default(),
+        }]);
+        // 无失败规则（含完全通过或未配置内容规则两种情形）都应静默
+        assert!(engine.evaluate(&http_result(true, true, Some(200))).is_none());
+    }
+
+    #[test]
+    fn content_rule_skipped_for_non_http_details() {
+        let engine = engine_with_rules(vec![AlertSingleRule {
+            rule_type: AlertRuleTypes::Content,
+            condition: NotifyCondition::default(),
+        }]);
+        let down = CheckResult {
+            id: 8,
+            monitor_type: MonitorType::Icmp,
+            target: Some("10.0.0.1".to_string()),
+            status: true,
+            details: CheckResultDetail::Icmp(IcmpMonitorResult {
+                is_alive: false,
+                elapsed_ms: 30,
+            }),
+        };
+        assert!(engine.evaluate(&down).is_none());
     }
 }

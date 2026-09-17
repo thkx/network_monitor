@@ -7,3 +7,6 @@ pub use file_tool::read_json_file;
 
 pub mod retry_tool;
 pub use retry_tool::default_retry_policy;
+
+pub mod smtp_tool;
+pub use smtp_tool::send_mail;

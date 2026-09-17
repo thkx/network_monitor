@@ -322,8 +322,30 @@ fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Err
             )));
         }
     }
-    // 告警配置校验：防抖参数范围 + THRESHOLD规则的阈值条件
+    // 告警配置校验：防抖参数范围 + 通知渠道专项 + THRESHOLD规则的阈值条件
     if let Some(cfg) = entry.alert_rules.as_ref() {
+        // 渠道专项校验：EMAIL必须带SMTP配置且收件人非空；SMS未实现，显式拒绝
+        // （避免"接受了配置却永远只打日志"的静默丢通知）
+        match cfg.notify_type.to_uppercase().as_str() {
+            "EMAIL" => {
+                let Some(email) = cfg.notify_config.email.as_ref() else {
+                    return Err(actix_web::error::ErrorBadRequest(
+                        "EMAIL 通知必须配置 notify_config.email（smtp_host/username/password/to）",
+                    ));
+                };
+                if email.to.is_empty() {
+                    return Err(actix_web::error::ErrorBadRequest(
+                        "EMAIL 通知的 email.to 至少需要一位收件人",
+                    ));
+                }
+            }
+            "SMS" => {
+                return Err(actix_web::error::ErrorBadRequest(
+                    "SMS 通知暂未实现，请使用 FEISHU / DINGTALK / WECOM / EMAIL",
+                ));
+            }
+            _ => {}
+        }
         for (label, n) in [
             ("consecutive_failures", cfg.consecutive_failures),
             ("consecutive_successes", cfg.consecutive_successes),
@@ -377,9 +399,8 @@ pub async fn get_console_status(
     result_service: web::Data<ResultService>,
     pool: web::Data<Arc<SqlitePool>>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let (monitors, _total) = monitor_service
-        .get_monitors_paged(1, 1000)
-        .map_err(internal_error)?;
+    // 全量读取而非分页接口硬编码1000上限：配置超过1000时状态页不再静默截尾
+    let monitors = monitor_service.get_all_monitors().map_err(internal_error)?;
     let latest: Vec<CheckResultModel> = result_service
         .get_latest_by_monitor()
         .map_err(internal_error)?;
@@ -814,5 +835,61 @@ mod tests {
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404);
+    }
+
+    // 状态聚合视图不受分页上限影响：此前硬编码 get_monitors_paged(1,1000)，
+    // 配置超过1000会静默截尾；改用get_all后应全量返回
+    #[actix_web::test]
+    async fn console_status_returns_all_monitors_beyond_page_size() {
+        use super::{DefaultResponseObj, MonitorStatusItem, get_console_status};
+        use actix_web::web;
+        use crate::database::connect_db::test_pool;
+        use crate::database::models::MonitorConfigInsert;
+        use crate::database::repositories::monitor_repo::MonitorRepository;
+        use crate::database::repositories::result_repo::CheckResultRepository;
+        use crate::database::services::monitor_service::MonitorService;
+        use crate::database::services::result_service::ResultService;
+        use crate::metrics::MetricsRegistry;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        let result_service = ResultService::new(CheckResultRepository::new(pool.clone()));
+        // 25条 > 常规分页20：若仍走分页接口即会截尾
+        for i in 0..25 {
+            monitor_service
+                .create_monitor(&MonitorConfigInsert {
+                    name: Some(format!("t-status-{i}")),
+                    target: format!("cpu://{i}"),
+                    method: None,
+                    monitor_type: "CPU".to_string(),
+                    interval_ms: Some(5),
+                    timeout_ms: 5000,
+                    config_json: Some(r#"{"monitor_type":"CPU","timeout":5}"#.to_string()),
+                    enabled: 1,
+                    tag: None,
+                })
+                .unwrap();
+        }
+
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(monitor_service.clone()))
+                .app_data(web::Data::new(result_service.clone()))
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(Arc::new(std::sync::Mutex::new(
+                    MetricsRegistry::new(),
+                ))))
+                .route("/api/status", web::get().to(get_console_status)),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::get().uri("/api/status").to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: DefaultResponseObj<Vec<MonitorStatusItem>> =
+            actix_web::test::read_body_json(resp).await;
+        assert_eq!(body.data.len(), 25, "状态页应返回全部25条配置");
     }
 }

@@ -130,4 +130,94 @@ impl Scheduler {
         );
         self.tasks.insert(row.id, handle);
     }
+
+    // 当前存活任务数（测试断言热更新/关停语义用）
+    #[cfg(test)]
+    pub(crate) fn active_task_count(&self) -> usize {
+        self.tasks.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scheduler;
+    use crate::database::connect_db::test_pool;
+    use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
+    use crate::database::repositories::monitor_repo::MonitorRepository;
+    use crate::database::services::monitor_service::MonitorService;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    // CPU类型监控：无网络依赖，任务可在测试内真实执行
+    fn insert_cpu(pool: &Arc<crate::database::connect_db::SqlitePool>, name: &str) -> i32 {
+        MonitorRepository::new(pool.clone())
+            .create_monitor(&MonitorConfigInsert {
+                name: Some(name.to_string()),
+                target: "cpu://local".to_string(),
+                method: None,
+                monitor_type: "CPU".to_string(),
+                interval_ms: Some(5),
+                timeout_ms: 5000,
+                config_json: Some(r#"{"monitor_type":"CPU","timeout":5}"#.to_string()),
+                enabled: 1,
+                tag: None,
+            })
+            .expect("测试监控创建失败")
+            .id
+    }
+
+    fn set_enabled(pool: &Arc<crate::database::connect_db::SqlitePool>, id: i32, enabled: bool) {
+        MonitorRepository::new(pool.clone())
+            .update_monitor(
+                id,
+                &MonitorConfigUpdate {
+                    enabled: Some(i32::from(enabled)),
+                    name: None,
+                    target: None,
+                    method: None,
+                    monitor_type: None,
+                    interval_ms: None,
+                    timeout_ms: None,
+                    config_json: None,
+                    tag: None,
+                },
+            )
+            .expect("启停更新失败");
+    }
+
+    // 热更新语义端到端：加载→任务真实产出结果→禁用配置→重建后任务数收敛→关停归零
+    #[tokio::test]
+    async fn reload_runs_tasks_and_hot_update_applies() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        let id1 = insert_cpu(&pool, "t-sched-1");
+        let _id2 = insert_cpu(&pool, "t-sched-2");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut scheduler = Scheduler::new(pool.clone(), 5);
+        scheduler.set_sender(tx);
+        scheduler.reload_all(&service);
+        assert_eq!(scheduler.active_task_count(), 2, "两个启用配置应各起一个任务");
+
+        // 任务真实运行：interval首tick立即触发，应收到带monitor_id的CPU检查结果
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("10秒内应产出结果")
+            .expect("通道不应关闭");
+        assert!(msg.route.monitor_id.is_some(), "Server模式结果应带主键");
+        assert!(
+            matches!(msg.result.monitor_type, crate::tools_types::MonitorType::Cpu),
+            "应为CPU监控结果"
+        );
+
+        // 禁用一个配置后热更新：任务数收敛为1（此前"列表里消失"的回归场景）
+        set_enabled(&pool, id1, false);
+        scheduler.reload_all(&service);
+        assert_eq!(scheduler.active_task_count(), 1, "禁用后应只剩1个任务");
+
+        // 关停：任务清空且发送端释放（消费者的recv将最终返回None）
+        scheduler.shutdown();
+        assert_eq!(scheduler.active_task_count(), 0, "关停后任务应清空");
+    }
 }

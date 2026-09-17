@@ -19,12 +19,14 @@ RUN apt-get update \
 
 COPY --from=builder /build/target/release/network_monitor /usr/local/bin/network_monitor
 
-# 数据库与日志写到卷目录；BIND_ADDR=0.0.0.0 使容器外可访问
+# 数据库与日志统一写到卷目录；BIND_ADDR=0.0.0.0 使容器外可访问
 # （默认127.0.0.1仅容器内可达，切不可在容器环境回退到默认值）
 ENV DATABASE_URL=/data/monitor.db \
     RESULT_RETENTION_DAYS=30 \
     RUST_LOG=info \
-    BIND_ADDR=0.0.0.0
+    BIND_ADDR=0.0.0.0 \
+    LOG_DIR=/data/logs \
+    CSV_PATH=/data/monitor_log.csv
 VOLUME /data
 
 # 监控配置不进镜像（避免自动导入示例目标），按需挂载：

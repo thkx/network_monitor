@@ -58,6 +58,11 @@ impl MonitorService {
         self.repo.get_all_enabled()
     }
 
+    // 全量查询所有监控配置（/api/status 控制台聚合视图用，不受分页上限影响）
+    pub fn get_all_monitors(&self) -> Result<Vec<MonitorConfigModel>, Error> {
+        self.repo.get_all()
+    }
+
     // 按ID查询监控配置
     pub fn get_monitor_by_id(&self, id: i32) -> Result<Option<MonitorConfigModel>, Error> {
         self.repo.get_monitor_by_id(id)

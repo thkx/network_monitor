@@ -59,6 +59,15 @@ impl MonitorRepository {
         Ok((results, total))
     }
 
+    // 全量查询所有监控配置（/api/status 控制台聚合视图用）
+    // 此前状态视图误用分页接口并硬编码1000上限，配置超限会静默截尾
+    pub fn get_all(&self) -> Result<Vec<MonitorConfigModel>, Error> {
+        let mut conn = get_connection(&self.pool);
+        monitor_config::table
+            .order(monitor_config::id.asc())
+            .load::<MonitorConfigModel>(&mut conn)
+    }
+
     // 查询所有启用的监控配置（不分页，供Server模式调度器加载）
     pub fn get_all_enabled(&self) -> Result<Vec<MonitorConfigModel>, Error> {
         let mut conn = get_connection(&self.pool);

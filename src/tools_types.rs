@@ -248,6 +248,11 @@ pub struct SelfDefineMonitorConfig {
     pub body: Option<HttpBodyConfig>, // 显式请求体配置，优先级高于params的JSON body语义
     #[serde(default)]
     pub content_evaluation_rules: Option<Vec<ContentVerificationRulesSingle>>, // 内容验证规则
+    /// 业务指标提取字段（JSON点路径，如 "code"、"data.queue"）：
+    /// HTTP响应体为JSON时按路径提取值到 advanced_available.business_metrics，
+    /// 供结果详情/告警消息展示（如接口返回的内部业务码、队列深度等）
+    #[serde(default)]
+    pub business_metric_fields: Vec<String>,
     #[serde(default)]
     pub alert_rules: Option<AlertVerificationRules>, // 告警配置
     #[serde(default)]
@@ -286,10 +291,31 @@ pub struct AlertVerificationRules {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NotifyConfig {
     pub webhook_url: String, // Webhook地址
-    /// 签名密钥（可选）：目前对 FEISHU 生效——飞书后台开启"签名校验"的机器人必须配置，
-    /// 引擎会自动按 {timestamp}\n{secret} 作为HMAC-SHA256密钥计算签名并附加到请求
+    /// 签名密钥（可选）：FEISHU/DINGTALK 后台开启"签名校验"时必填，
+    /// 引擎自动计算签名——飞书附加到请求体，钉钉自动拼接到 webhook_url
     #[serde(default)]
     pub secret: Option<String>,
+    /// SMTP邮件配置（可选）：notify_type=EMAIL 时必填，其余渠道忽略
+    #[serde(default)]
+    pub email: Option<EmailNotifyConfig>,
+}
+
+/// EMAIL渠道的SMTP配置：直连SMTP服务器发信（465隐式TLS / 587 STARTTLS / 25明文）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EmailNotifyConfig {
+    pub smtp_host: String,          // SMTP服务器地址，如 smtp.example.com
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,             // 465=隐式TLS，587=STARTTLS，25=明文
+    pub username: String,           // 认证用户名（通常为发件邮箱）
+    #[serde(default)]
+    pub password: String,           // 认证密码/授权码；为空则跳过认证（本地relay场景）
+    #[serde(default)]
+    pub from: Option<String>,       // 发件人；缺省使用username
+    pub to: Vec<String>,            // 收件人列表（至少一个）
+}
+
+fn default_smtp_port() -> u16 {
+    465
 }
 
 /// 单条告警触发规则
@@ -305,7 +331,7 @@ pub enum AlertRuleTypes {
     #[serde(rename = "RESPONSE_CODE")]
     ResponseCode, // 响应码规则（仅HTTP）
     #[serde(rename = "CONTENT")]
-    Content, // 内容匹配规则（预留）
+    Content, // 内容匹配规则（仅HTTP：内容校验规则存在未命中项时告警）
     #[serde(rename = "AVAILABILITY")]
     Availability, // 可用性规则（全部监控类型生效）
     #[serde(rename = "THRESHOLD")]

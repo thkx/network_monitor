@@ -1,5 +1,5 @@
 // 通知引擎：根据通知类型把告警消息发送到对应的渠道
-// 支持渠道：FEISHU（可选secret签名）、DINGTALK、WECOM（EMAIL/SMS为占位）
+// 支持渠道：FEISHU（可选secret签名）、DINGTALK（可选secret自动加签）、WECOM、EMAIL（SMTP）
 // 发送失败自动转入后台退避重试（见 retry_with_backoff / RETRY_DELAYS_SECS）
 
 use crate::tools_types::NotifyConfig;
@@ -24,12 +24,49 @@ impl NotifyEngine {
     pub async fn send_alert_message(&self, message: String) {
         match self.notify_type.to_uppercase().as_str() {
             "EMAIL" => {
-                // 邮件通知（预留）
-                tracing::info!("[EMAIL告警] {}", message);
+                // SMTP邮件：构建传输器后整个会话后台化——SMTP多次往返可能远超5秒，
+                // 不能阻塞监控任务循环；重试/成功/失败日志与webhook渠道同一口径
+                let Some(email_cfg) = &self.notify_config.email else {
+                    tracing::error!(
+                        "EMAIL告警发送失败: notify_config.email 未配置（需smtp_host/username/to）"
+                    );
+                    return;
+                };
+                let cfg = email_cfg.clone();
+                // 主题按消息性质区分：恢复通知与告警在邮箱里一眼可分
+                let subject = if message.starts_with("[监控恢复]") {
+                    "网络监控恢复通知"
+                } else {
+                    "网络监控告警通知"
+                };
+                tokio::spawn(async move {
+                    let outcome = retry_with_backoff(
+                        |attempt| {
+                            let cfg = cfg.clone();
+                            let body = message.clone();
+                            async move {
+                                crate::tools::send_mail(&cfg, subject, &body)
+                                    .await
+                                    .map_err(|e| format!("第{}次重试: {}", attempt + 1, e))
+                            }
+                        },
+                        &RETRY_DELAYS_SECS,
+                    )
+                    .await;
+                    match outcome {
+                        Ok(()) => tracing::info!("EMAIL告警发送成功: {}", message),
+                        Err(e) => tracing::error!(
+                            "EMAIL告警重试全部失败，通知可能丢失: {}（{}）",
+                            message,
+                            e
+                        ),
+                    }
+                });
             }
             "SMS" => {
-                // 短信通知（预留）
-                tracing::info!("[SMS告警] {}", message);
+                // 未实现的渠道显式报错而非假装成功：配置校验层已拒绝SMS，
+                // 此日志只在配置绕过校验直写数据库时出现
+                tracing::error!("SMS告警渠道未实现，通知未发送: {}", message);
             }
             "FEISHU" => {
                 // 飞书自定义机器人：msg_type/content结构 + 可选签名
@@ -43,11 +80,16 @@ impl NotifyEngine {
                     body["timestamp"] = serde_json::Value::from(timestamp.to_string());
                     body["sign"] = serde_json::Value::from(feishu_sign(timestamp, secret));
                 }
-                self.post_webhook(body, &message, "飞书").await;
+                self.post_webhook(
+                    self.notify_config.webhook_url.as_str(),
+                    body,
+                    &message,
+                    "飞书",
+                )
+                .await;
             }
             "DINGTALK" | "WECOM" => {
                 // 钉钉/企业微信机器人：JSON结构相同 {"msgtype":"text","text":{"content":...}}
-                // 注意：钉钉若开启"加签"安全设置，需在webhook_url自行拼接timestamp/sign参数
                 let body = serde_json::json!({
                     "msgtype": "text",
                     "text": { "content": message }
@@ -57,7 +99,22 @@ impl NotifyEngine {
                 } else {
                     "企业微信"
                 };
-                self.post_webhook(body, &message, channel).await;
+                // 钉钉"加签"安全设置：sign = base64(HMAC-SHA256(key=secret, "{毫秒时间戳}\n{secret}"))，
+                // URL编码后与timestamp一起拼接到webhook_url（URL已含timestamp参数则尊重手拼结果）
+                let mut url = self.notify_config.webhook_url.clone();
+                if self.notify_type.to_uppercase() == "DINGTALK"
+                    && let Some(secret) = &self.notify_config.secret
+                    && !url.contains("timestamp=")
+                {
+                    let ts = chrono::Utc::now().timestamp_millis();
+                    let sign = dingtalk_sign(ts, secret);
+                    let encoded = url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("sign", &sign)
+                        .finish();
+                    let sep = if url.contains('?') { "&" } else { "?" };
+                    url = format!("{url}{sep}timestamp={ts}&{encoded}");
+                }
+                self.post_webhook(url.as_str(), body, &message, channel).await;
             }
             _ => {
                 tracing::warn!("未知的告警通知类型: {}", self.notify_type);
@@ -67,7 +124,7 @@ impl NotifyEngine {
 
     // 统一的webhook POST：带5秒超时，避免通知渠道故障阻塞监控任务循环
     // 首次发送失败后转入后台退避重试：告警因网络抖动被静默丢弃的代价太高
-    async fn post_webhook(&self, body: serde_json::Value, message: &str, channel: &str) {
+    async fn post_webhook(&self, url: &str, body: serde_json::Value, message: &str, channel: &str) {
         let client = match Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -78,7 +135,7 @@ impl NotifyEngine {
                 return;
             }
         };
-        match Self::try_post(&client, &self.notify_config.webhook_url, &body, channel).await {
+        match Self::try_post(&client, url, &body, channel).await {
             Ok(()) => {
                 tracing::info!("{}告警发送成功: {}", channel, message);
                 return;
@@ -94,7 +151,7 @@ impl NotifyEngine {
         }
         // 后台重试：全部字段克隆进任务，不阻塞监控任务循环；
         // 重试成功/耗尽都有明确日志，最终失败时告警丢失是显式可见的
-        let url = self.notify_config.webhook_url.clone();
+        let url = url.to_string();
         let channel = channel.to_string();
         let message = message.to_string();
         tokio::spawn(async move {
@@ -212,9 +269,24 @@ fn feishu_sign(timestamp: i64, secret: &str) -> String {
     BASE64_STANDARD.encode(mac.finalize().into_bytes())
 }
 
+// 钉钉加签算法：以 secret 为HMAC-SHA256密钥，对 "{毫秒时间戳}\n{secret}" 签名后base64
+// （与飞书方向相反：飞书密钥和时间戳串一起做密钥，钉钉时间戳串是被签消息）
+fn dingtalk_sign(timestamp_millis: i64, secret: &str) -> String {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let string_to_sign = format!("{}\n{}", timestamp_millis, secret);
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(string_to_sign.as_bytes());
+    BASE64_STANDARD.encode(mac.finalize().into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NotifyEngine, RETRY_DELAYS_SECS, feishu_sign, retry_with_backoff};
+    use super::{dingtalk_sign, feishu_sign, NotifyEngine, RETRY_DELAYS_SECS, retry_with_backoff};
 
     #[test]
     fn feishu_sign_matches_reference_vector() {
@@ -222,6 +294,16 @@ mod tests {
         assert_eq!(
             feishu_sign(1712126400, "test-secret"),
             "BbGyLWSeiDDaf5+1ZZHc+miQjKW0aT9Rp/4iOd3ju5I="
+        );
+    }
+
+    #[test]
+    fn dingtalk_sign_matches_reference_vector() {
+        // 参考向量由PowerShell HMACSHA256独立计算：
+        // key = "test-secret"，消息 = "1712126400000\ntest-secret"（钉钉用毫秒时间戳）
+        assert_eq!(
+            dingtalk_sign(1712126400000, "test-secret"),
+            "a3Oj/xZUNmKv482dWMT5v1Nhr+PAlFKrLxjD39MXOXA="
         );
     }
 

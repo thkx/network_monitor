@@ -14,6 +14,22 @@ use x509_parser::prelude::*;
 //定义一个函数返回类型为一个元组即可
 type DnsTcpTlsPerformance = (u128, u128, u128, Option<CertificateInfo>); // DNS时间，TCP时间，TLS时间，证书信息
 
+// 系统配置resolver的进程级缓存：tokio_from_system_conf每次构造要读系统配置并初始化
+// 线程池（Windows上实测可达秒级），而resolver句柄本身可克隆共享——每次HTTP检查
+// 重建一次纯属浪费，还会挤占客户端的请求超时预算（body读取被饿死）
+static SYSTEM_RESOLVER: std::sync::OnceLock<Option<trust_dns_resolver::TokioAsyncResolver>> =
+    std::sync::OnceLock::new();
+
+fn system_resolver() -> Option<trust_dns_resolver::TokioAsyncResolver> {
+    SYSTEM_RESOLVER
+        .get_or_init(|| {
+            trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()
+                .map_err(|e| tracing::warn!("系统DNS resolver初始化失败，跳过DNS计时: {e}"))
+                .ok()
+        })
+        .clone()
+}
+
 // 计算 性能监控相关数据 DNS TCP TLS 三个数据耗时 以及在连接过程中SSL证书相关信息
 pub async fn get_dns_tcp_tls_performance(
     url: &str,
@@ -22,7 +38,7 @@ pub async fn get_dns_tcp_tls_performance(
     let url = reqwest::Url::parse(url)?;
     let host = url.host_str().ok_or("Invalid URL")?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
+    let resolver = system_resolver().ok_or("DNS resolver unavailable")?;
     let dns_lookup_time = std::time::Instant::now();
     let ips = resolver.lookup_ip(host).await?;
     // 开始设置DNS的缓存时间

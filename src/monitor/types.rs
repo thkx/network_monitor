@@ -131,6 +131,7 @@ impl MonitorConfig {
                     headers,
                     body,
                     rules: entry.content_evaluation_rules.clone(),
+                    business_metric_fields: entry.business_metric_fields.clone(),
                 })
             }
             MonitorType::Icmp => MonitorConfigDetail::Icmp(IcmpMonitorConfig {}),
@@ -215,6 +216,7 @@ pub struct HttpMonitorConfig {
     pub headers: Option<HeaderMap<HeaderValue>>,            // 可选的请求URL需要的HTTP头
     pub body: Option<HttpBody>,                             // 可选的请求URL需要的body体
     pub rules: Option<Vec<ContentVerificationRulesSingle>>, // 可配置的监控规则
+    pub business_metric_fields: Vec<String>,                // 业务指标提取字段（JSON点路径），空=不提取
 }
 
 // 其中监控的规则的话我们来简单实现了一下

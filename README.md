@@ -1,6 +1,6 @@
 # 网络监控器（network_monitor）
 
-基于 Rust 的多类型网络/系统监控器：定时探测目标、结果落库（SQLite）、CSV 日志、规则告警（飞书/钉钉/企业微信 Webhook）与 Web API 管理。
+基于 Rust 的多类型网络/系统监控器：定时探测目标、结果落库（SQLite）、CSV 日志、规则告警（飞书/钉钉/企业微信 Webhook / SMTP 邮件）与 Web API 管理。
 
 ## 功能特性
 
@@ -12,9 +12,9 @@
     （`--interval` 为未配置 interval 的监控项的默认间隔，秒，缺省 5；调度任务与手动执行共用）
 - **Web API**：监控配置 CRUD、分页筛选、启用/禁用（PATCH）、结果查询，配置变更热更新（无需重启）
 - **告警体系**：
-  - `AVAILABILITY` 通用可用性规则（全部监控类型生效）、`RESPONSE_CODE` 响应码规则（仅 HTTP）
+  - `AVAILABILITY` 通用可用性规则（全部监控类型生效）、`RESPONSE_CODE` 响应码规则（仅 HTTP）、`CONTENT` 内容校验规则（仅 HTTP，内容规则存在未命中项时告警）、`THRESHOLD` 阈值规则（系统资源类）
   - 状态机式告警：故障只告警一次，恢复时发送恢复通知，抑制状态持久化到数据库（重启不重复告警）
-  - 通知渠道：飞书（可选 secret 签名）、钉钉、企业微信；发送超时 5 秒不阻塞监控任务
+  - 通知渠道：飞书（可选 secret 签名）、钉钉（可选 secret 自动加签）、企业微信、邮件（SMTP）；webhook 发送超时 5 秒不阻塞监控任务，邮件会话整体后台化
 - **数据可靠性**：SQLite WAL 模式 + busy_timeout、连接池、迁移自动执行、结果保留策略（默认 30 天）
 
 ## 快速开始
@@ -76,9 +76,13 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 }
 ```
 
-- `notify_type` 支持 `FEISHU` / `DINGTALK` / `WECOM`（大小写不敏感）
-- 钉钉机器人若开启"加签"安全设置，需自行在 webhook_url 上拼接 timestamp/sign 参数
-- `AVAILABILITY` 对所有监控类型生效；`RESPONSE_CODE` 仅对 HTTP 生效
+- `notify_type` 支持 `FEISHU` / `DINGTALK` / `WECOM` / `EMAIL`（大小写不敏感）
+- 钉钉机器人开启"加签"安全设置时配置 `secret` 即可，引擎自动计算签名并拼接 `timestamp`/`sign` 到 webhook_url（URL 已含 timestamp 参数时不覆盖，兼容手拼）
+- `AVAILABILITY` 对所有监控类型生效；`RESPONSE_CODE` / `CONTENT` 仅对 HTTP 生效
+- **EMAIL 渠道**：在 `notify_config.email` 配置 SMTP 即可，如
+  `"email": {"smtp_host":"smtp.example.com","smtp_port":465,"username":"monitor@example.com","password":"授权码","to":["ops@example.com"]}`
+  （465=隐式TLS，587=STARTTLS，其他端口=明文仅建议本地 relay；password 为空则跳过认证）
+- **SMS 未实现**：配置期直接返回 400 拒绝，不做静默占位
 - **防抖**：`consecutive_failures` 连续 N 次命中才发告警、`consecutive_successes` 连续 M 次正常才发恢复通知（缺省均为 1；可根治网络抖动误报）
 - **失败重试**：通知发送失败后自动后台退避重试（1s/5s/30s/2m/5m 共 5 次），不阻塞监控任务循环；重试成功与最终放弃均有明确日志
 - **业务码校验**：飞书/钉钉/企微业务失败（签名错、关键词不符等）时 HTTP 仍返回 200，响应体中 `errcode`/`code` 非零同样判定为失败并进入重试，避免告警静默丢失
@@ -103,6 +107,40 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 `metric` 支持 `cpu` / `memory` / `disk`（按总量换算使用率，也可用 `available_bytes`）/ `process`；`op` 支持 `> >= < <= ==`。
 
+- **CONTENT 内容校验规则**（仅 HTTP）：监控上配置的 `content_evaluation_rules` 存在未命中项时告警，
+  与 `AVAILABILITY` 正交——内容校验失败不影响可达性判定，由本规则单独负责；未配置内容规则时静默跳过。
+
+```json
+{
+  "target": "https://example.com",
+  "monitor_type": "HTTP",
+  "content_evaluation_rules": [
+    { "rule_type": "contains", "rule_content": "OK", "rule_description": "页面应包含OK" }
+  ],
+  "alert_rules": {
+    "notify_type": "FEISHU",
+    "notify_config": { "webhook_url": "https://..." },
+    "rules": [ { "rule_type": "CONTENT", "condition": {} } ]
+  }
+}
+```
+
+## 业务指标提取（HTTP）
+
+配置 `business_metric_fields`（JSON 点路径数组），HTTP 响应体为 JSON 时按路径提取值，
+随结果详情返回并落库（`advanced_available.business_metrics`），适合观测接口返回的内部业务码、
+队列深度等业务指标：
+
+```json
+{
+  "target": "https://api.example.com/health",
+  "monitor_type": "HTTP",
+  "business_metric_fields": ["code", "data.queue", "shards.0.lag"]
+}
+```
+
+路径不存在或响应体非 JSON 时静默跳过，不影响可用性判定。
+
 ## 配置校验规则
 
 创建/更新监控时服务端校验（非法配置返回 400）：
@@ -112,6 +150,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - 内容规则中的 `regex`：必须是合法正则表达式
 - `consecutive_failures` / `consecutive_successes`：1 ~ 1000
 - THRESHOLD 规则必须配置 `threshold`，且 `op` 必须合法
+- EMAIL 渠道必须配置 `notify_config.email` 且 `to` 至少一位收件人；`SMS` 未实现，直接拒绝
 
 ## 环境变量
 
@@ -124,6 +163,8 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | `ADMIN_PASSWORD`        | （空=不启用认证） | 设置后启用登录认证，强烈建议配置       |
 | `METRICS_TOKEN`         | （空=metrics开放）| 配置后 `/metrics` 需要 `Bearer` 令牌   |
 | `BIND_ADDR`             | `127.0.0.1`       | Web API 监听地址；容器/局域网部署设 `0.0.0.0` |
+| `LOG_DIR`               | `./logs`          | 文件日志目录；容器部署应指向持久卷         |
+| `CSV_PATH`              | `./monitor_log.csv` | CSV 日志路径；容器部署应指向持久卷       |
 
 ## 认证
 
@@ -219,8 +260,14 @@ docker run -d --name network_monitor \
   network_monitor
 ```
 
-镜像内默认 `BIND_ADDR=0.0.0.0`、`DATABASE_URL=/data/monitor.db`；如需导入初始配置：
+```bash
+docker compose up -d
+```
+
+`docker-compose.yml` 含卷挂载与常用环境变量骨架（数据库/日志/CSV 统一落 `/data` 卷，
+`LOG_DIR=/data/logs`、`CSV_PATH=/data/monitor_log.csv`）；如需导入初始配置：
 `-v ./monitor_list.json:/app/monitor_list.json`（启动时按名称去重幂等导入）。
+打 `v*` tag 推送后，Release workflow 会自动构建双平台二进制并发布 GHCR 镜像。
 
 ## 开发
 
@@ -248,7 +295,7 @@ src/
 │   ├── repositories/    # 仓库层（monitor_config/check_result/alert_state）
 │   └── services/        # 业务服务层
 ├── monitor/             # 12种监控引擎（策略模式 + 工厂）
-├── tools/               # HTTP/TLS 探测工具、重试策略
+├── tools/               # HTTP/TLS 探测、SMTP邮件（lettre封装）、重试策略
 ├── tools_types.rs       # 全局类型定义
 └── csv_logger.rs        # CSV 日志（check_id 与数据库关联）
 ```

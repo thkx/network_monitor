@@ -17,8 +17,10 @@ impl FormatTime for LocalTimer {
 }
 
 // 初始化全局日志订阅器；返回的 Guard 必须在 main 中保活（drop 时刷新文件缓冲区）
+// 日志目录可用 LOG_DIR 覆盖（缺省 ./logs，容器部署应指向持久卷）
 pub fn init() -> tracing_appender::non_blocking::WorkerGuard {
-    let file_appender = tracing_appender::rolling::daily("logs", "network_monitor.log");
+    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string());
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "network_monitor.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_default_env()

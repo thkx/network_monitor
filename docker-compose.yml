@@ -1,0 +1,20 @@
+services:
+  network_monitor:
+    build: .
+    # 使用预构建镜像时注释 build 并取消注释（替换 OWNER 为仓库所有者）：
+    # image: ghcr.io/OWNER/network_monitor:latest
+    ports:
+      - "8080:8080"
+    environment:
+      # 未设置密码时 API 与控制台无认证，务必修改
+      ADMIN_PASSWORD: change-me-strong
+      # METRICS_TOKEN: random-token-for-prometheus
+      # COOKIE_SECURE: "1"   # HTTPS 反代后开启
+    volumes:
+      - nm-data:/data
+      # 初始监控配置按需挂载（启动时按名称去重幂等导入）：
+      # - ./monitor_list.json:/app/monitor_list.json:ro
+    restart: unless-stopped
+
+volumes:
+  nm-data:
