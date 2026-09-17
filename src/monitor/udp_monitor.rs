@@ -50,6 +50,8 @@ impl Monitor for UdpMonitor {
             && let Some(addr) = addrs.next()
         {
             // 绑定一个随机本地端口用于发送和接收
+            // 等待响应超时对齐config.timeout（毫秒；下限1秒防配置0导致立即超时，与ICMP同规则）
+            let wait = std::time::Duration::from_millis(config.timeout.max(1000));
             if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
                 // DNS模式发送真实查询报文；其余端口发送简单载荷等任意回包
                 let txid = uuid::Uuid::new_v4().as_u128() as u16;
@@ -61,9 +63,9 @@ impl Monitor for UdpMonitor {
                 if socket.send_to(&payload, addr).await.is_ok() {
                     sent = true;
                     let mut buf = [0u8; 1024];
-                    // 等待响应，最多等待3秒
+                    // 等待响应，超时时间由config.timeout决定（见上方wait）
                     if let Ok(Ok((n, _))) = tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
+                        wait,
                         socket.recv_from(&mut buf),
                     )
                     .await

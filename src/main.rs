@@ -52,10 +52,6 @@ mod tools;
 mod tools_types;
 use tools_types::{SelfDefineMonitorConfig, display_name};
 
-// 文件管理模块（独立功能，暂未接入主流程）
-// #[allow(dead_code)]
-// mod fm;
-
 use actix_web::{App, HttpServer, web};
 use clap::Parser;
 use std::sync::{Arc, Mutex};
@@ -222,6 +218,8 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
     });
     let metrics_for_app = metrics_registry.clone();
     let pool_for_app = pool.clone();
+    // 监听地址：默认127.0.0.1仅本机可访问；容器/局域网部署时设BIND_ADDR=0.0.0.0
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
     // 先绑定并转成Server future：ServerHandle从Server获取（actix-web 4中HttpServer本身没有handle()）
     // 关停段持有独立的Data克隆：HttpServer闭包move会接管scheduler本体
     let scheduler_for_shutdown = scheduler.clone();
@@ -239,7 +237,7 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
             .wrap(Auth::new(session_store.clone(), auth_config.clone()))
             .configure(api::configure_routes)
     })
-    .bind(("127.0.0.1", port))
+    .bind((bind_addr.as_str(), port))
     {
         Ok(srv) => srv.run(),
         Err(e) => {

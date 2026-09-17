@@ -1,0 +1,8 @@
+target/
+db/
+logs/
+*.csv
+.env
+.git/
+.github/
+README.md

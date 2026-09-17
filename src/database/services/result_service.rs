@@ -75,3 +75,47 @@ impl ResultService {
         self.repo.delete_older_than_days(days)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ResultService;
+    use crate::database::connect_db::test_pool;
+    use crate::database::repositories::result_repo::CheckResultRepository;
+    use crate::database::repositories::test_support::create_test_monitor;
+    use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
+    use crate::tools_types::MonitorType;
+    use std::sync::Arc;
+
+    // build_insert是单条与批量共用的唯一构造点：验证check_id与完整结果详情
+    // 均进入metadata_json（详情入库后 /api/results 可直接回查失败现场）
+    #[test]
+    fn persist_check_roundtrips_check_id_and_details() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_id = create_test_monitor(&pool, "t-details");
+        let service = ResultService::new(CheckResultRepository::new(pool));
+
+        let result = CheckResult {
+            id: 0xdeadbeef,
+            monitor_type: MonitorType::Icmp,
+            target: Some("10.0.0.1".to_string()),
+            status: true,
+            details: CheckResultDetail::Icmp(IcmpMonitorResult {
+                is_alive: true,
+                elapsed_ms: 42,
+            }),
+        };
+        service.persist_check(monitor_id, &result).unwrap();
+
+        let (list, total) = service.get_check_results(Some(monitor_id), 1, 10).unwrap();
+        assert_eq!(total, 1);
+        let metadata = list[0].metadata_json.as_deref().expect("metadata_json应存在");
+        let v: serde_json::Value = serde_json::from_str(metadata).expect("metadata_json应为合法JSON");
+        // check_id为16进制（与CSV日志关联）
+        assert_eq!(v["check_id"], "deadbeef");
+        // details为序列化的CheckResultDetail（外标签枚举：{"Icmp":{...}}），完整可回查
+        let details = v["details"].as_object().expect("details应为JSON对象");
+        assert!(details.contains_key("Icmp"), "details应保留类型标签: {details:?}");
+        assert_eq!(details["Icmp"]["elapsed_ms"], 42);
+    }
+}

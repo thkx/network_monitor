@@ -123,6 +123,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | `ADMIN_USER`            | `admin`           | 登录用户名                             |
 | `ADMIN_PASSWORD`        | （空=不启用认证） | 设置后启用登录认证，强烈建议配置       |
 | `METRICS_TOKEN`         | （空=metrics开放）| 配置后 `/metrics` 需要 `Bearer` 令牌   |
+| `BIND_ADDR`             | `127.0.0.1`       | Web API 监听地址；容器/局域网部署设 `0.0.0.0` |
 
 ## 认证
 
@@ -202,14 +203,29 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 ## 存储与写入策略
 
 - **攒批落库**：消费者满 64 条或首个待写结果等待超 1 秒，即以单条多行 INSERT 落库——写锁次数降为批次级，高监控数下避免逐条小事务的锁竞争；批量失败自动降级逐条写入（CSV 日志另有完整备份）
+- **详情随行**：`metadata_json` 内含 `check_id` 与该次检查的完整结果详情 JSON，历史结果可直接通过 `/api/results` 回查（旧记录仅有 check_id）
 - **WAL 模式**：读写不互斥，配合 busy_timeout 5s 与 foreign_keys 级联删除
 - **保留策略**：每 24 小时清理 `RESULT_RETENTION_DAYS` 天前的过期结果
 - **优雅关停**：Ctrl+C / SIGTERM 后停止接受请求、停掉全部监控任务并完成最终攒批落库（同步 DB 调用均在阻塞线程池执行，不卡 runtime）
 
+## Docker 部署
+
+```bash
+docker build -t network_monitor .
+# 数据库/日志落在卷 /data；monitor_list.json 按需挂载（不挂载则从空库开始，用 API 创建）
+docker run -d --name network_monitor \
+  -p 8080:8080 -v network_monitor-data:/data \
+  -e ADMIN_PASSWORD=your-strong-password \
+  network_monitor
+```
+
+镜像内默认 `BIND_ADDR=0.0.0.0`、`DATABASE_URL=/data/monitor.db`；如需导入初始配置：
+`-v ./monitor_list.json:/app/monitor_list.json`（启动时按名称去重幂等导入）。
+
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（49个：纯函数单测 + 临时库集成测试 + 外键级联验证）
+cargo test          # 运行全部测试（91个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```
@@ -234,12 +250,12 @@ src/
 ├── monitor/             # 12种监控引擎（策略模式 + 工厂）
 ├── tools/               # HTTP/TLS 探测工具、重试策略
 ├── tools_types.rs       # 全局类型定义
-├── csv_logger.rs        # CSV 日志（check_id 与数据库关联）
-└── fm/                  # 文件管理模块（独立功能，暂未接入主流程）
+└── csv_logger.rs        # CSV 日志（check_id 与数据库关联）
 ```
 
 ### 设计要点
 
 - **告警引擎按任务独占**：每个监控任务持有独立的引擎实例与抑制状态；调度器热更新重建任务时，抑制状态从 `alert_state` 表恢复，避免"故障还在却重复告警"
 - **check_id 贯穿**：每次检查生成 u128 ID，CSV 日志以 16 进制输出，同时写入数据库 `metadata_json.check_id`，两边可精确关联
+- **详情入库**：完整结果详情 JSON 一并写入 `metadata_json.details`（HTTP 的证书/耗时/安全头、FTP 握手过程等），`GET /api/results` 返回的 `metadata_json` 字段可直接回查失败现场，不依赖日志文件
 - **失败信息可观测**：HTTP 失败结果携带 `error_kind`（timeout/connect/decode/other）与 `error_message`，告警消息直接附带

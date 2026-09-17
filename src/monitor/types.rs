@@ -241,9 +241,9 @@ impl CheckResult {
     pub fn log_fields(&self) -> (bool, u128, Option<u16>) {
         match &self.details {
             CheckResultDetail::Http(r) => (
-                r.basic_avaliable.is_reachable,
+                r.basic_available.is_reachable,
                 r.performance_timings.total_time,
-                r.basic_avaliable.res_status_code,
+                r.basic_available.res_status_code,
             ),
             CheckResultDetail::Icmp(r) => (r.is_alive, r.elapsed_ms, None),
             CheckResultDetail::Tcp(r) => (r.connected, r.elapsed_ms, None),
@@ -498,7 +498,7 @@ mod tests {
             target: None,
             status: true,
             details: CheckResultDetail::Http(crate::tools_types::HttpMonitorResult {
-                basic_avaliable: crate::tools_types::BasicAvailability {
+                basic_available: crate::tools_types::BasicAvailability {
                     is_reachable: false,
                     res_status_code: Some(500),
                     ..Default::default()

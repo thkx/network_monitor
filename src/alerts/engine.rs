@@ -176,7 +176,7 @@ impl AlertsEngine {
             ..
         } = condition;
         // 未获取到响应码说明请求失败，直接触发告警
-        let Some(code) = http_result.basic_avaliable.res_status_code else {
+        let Some(code) = http_result.basic_available.res_status_code else {
             return Some(format!(
                 "[监控告警] target: {} | 请求失败，未获取到响应码（{}）",
                 target,
@@ -217,7 +217,7 @@ fn is_target_available(check_result: &CheckResult) -> bool {
         return false;
     }
     match &check_result.details {
-        CheckResultDetail::Http(r) => r.basic_avaliable.is_reachable,
+        CheckResultDetail::Http(r) => r.basic_available.is_reachable,
         CheckResultDetail::Icmp(r) => r.is_alive,
         CheckResultDetail::Tcp(r) => r.connected,
         CheckResultDetail::Udp(r) => r.response_received,
@@ -287,7 +287,7 @@ fn evaluate_threshold(check_result: &CheckResult, condition: &NotifyCondition) -
 // 结果摘要：附加到告警/恢复消息里，值班看到通知即可直接判断故障性质
 fn detail_summary(details: &CheckResultDetail) -> String {
     match details {
-        CheckResultDetail::Http(r) => match r.basic_avaliable.res_status_code {
+        CheckResultDetail::Http(r) => match r.basic_available.res_status_code {
             Some(code) => format!("状态码 {}，耗时 {} ms", code, r.performance_timings.total_time),
             None => format!("请求失败（{}）", failure_reason(r)),
         },
@@ -349,7 +349,7 @@ mod tests {
             target: Some("https://example.com".to_string()),
             status,
             details: CheckResultDetail::Http(HttpMonitorResult {
-                basic_avaliable: BasicAvailability {
+                basic_available: BasicAvailability {
                     is_reachable: reachable,
                     res_status_code: code,
                     ..Default::default()

@@ -251,7 +251,7 @@ impl HttpMonitor {
     // 创建高级可用性结果 直接返回一个默认结果
     fn create_advanced_availability_result(&self) -> AdvancedAvailability {
         AdvancedAvailability {
-            bussiness_metrics: HashMap::new(),
+            business_metrics: HashMap::new(),
         }
     }
 }
@@ -297,7 +297,7 @@ impl Monitor for HttpMonitor {
                         let body = response.text().await.unwrap_or_default();
                         let total_time = start_time_instant.elapsed().as_millis();
                         // 创建基本结果和头部结果
-                        let basic_avaliable = self.create_basic_result(
+                        let basic_available = self.create_basic_result(
                             status_code,
                             version,
                             &headers,
@@ -321,15 +321,15 @@ impl Monitor for HttpMonitor {
                             ..Default::default()
                         };
                         return (
-                            true, // 监控任务执行成功；目标是否可用看 basic_avaliable.is_reachable
+                            true, // 监控任务执行成功；目标是否可用看 basic_available.is_reachable
                             CheckResultDetail::Http(HttpMonitorResult {
-                                basic_avaliable,
+                                basic_available,
                                 response_headers,
                                 performance_timings,
                                 certificate_info: ssl_certificate_info.unwrap_or_default(),
                                 content_verification: self
                                     .create_content_verification_result(body, &detail.rules),
-                                advanced_avaliable: self.create_advanced_availability_result(),
+                                advanced_available: self.create_advanced_availability_result(),
                                 error_message: None,
                                 error_kind: None,
                             }),
@@ -349,7 +349,7 @@ impl Monitor for HttpMonitor {
                         return (
                             true, // 监控任务执行成功；目标不可达体现在 is_reachable=false
                             CheckResultDetail::Http(HttpMonitorResult {
-                                basic_avaliable: BasicAvailability {
+                                basic_available: BasicAvailability {
                                     is_reachable: false,
                                     ..Default::default()
                                 },

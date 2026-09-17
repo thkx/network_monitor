@@ -82,12 +82,12 @@ impl std::fmt::Display for MonitorType {
 // 定义一个struct 来保存http相关监控的最终结果参数结构体
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct HttpMonitorResult {
-    pub basic_avaliable: BasicAvailability,
+    pub basic_available: BasicAvailability,
     pub response_headers: SecurityHeaders,
     pub performance_timings: PerformanceTimings,
     pub certificate_info: CertificateInfo, // SSL证书信息
     pub content_verification: ContentVerificationResult,
-    pub advanced_avaliable: AdvancedAvailability,
+    pub advanced_available: AdvancedAvailability,
     pub error_message: Option<String>, // 请求失败原因（成功时为None；此前失败路径直接丢弃错误信息）
     pub error_kind: Option<String>,    // 错误类别：timeout/connect/decode/other
 }
@@ -201,7 +201,7 @@ pub enum StatusInfo {
 // 高级可用性类别 业务指标监控 事务监控 等
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AdvancedAvailability {
-    pub bussiness_metrics: HashMap<String, String>,
+    pub business_metrics: HashMap<String, String>,
 }
 
 // 定义状态码对应的状态枚举类型
