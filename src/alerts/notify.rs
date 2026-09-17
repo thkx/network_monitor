@@ -116,24 +116,60 @@ impl NotifyEngine {
         });
     }
 
-    // 单次webhook发送尝试：2xx视为成功，其余状态码与请求错误均为失败
+    // 单次webhook发送尝试：HTTP 2xx 且业务码为成功才算成功
+    // 飞书/钉钉/企微的业务失败（签名错、关键词不符等）同样返回HTTP 200，
+    // 只看状态码会把失败当成功、退避重试形同虚设，告警会被静默丢失，
+    // 因此必须解析响应体中的业务码（errcode/code/StatusCode）
     pub(crate) async fn try_post(
         client: &Client,
         url: &str,
         body: &serde_json::Value,
         channel: &str,
     ) -> Result<(), String> {
-        match client.post(url).json(body).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    Ok(())
-                } else {
-                    Err(format!("{}返回状态码 {}", channel, resp.status()))
-                }
-            }
-            Err(e) => Err(format!("请求错误 {}", e)),
+        let resp = client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("请求错误 {}", e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("{}返回状态码 {}", channel, status));
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("{}响应体读取失败: {}", channel, e))?;
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => match business_error(&v) {
+                Some(err) => Err(format!("{}业务错误: {}", channel, err)),
+                None => Ok(()),
+            },
+            // 响应体不是JSON（如网关返回纯文本）：无从校验业务码，按成功处理避免误重试
+            Err(_) => Ok(()),
         }
     }
+}
+
+// 从webhook响应JSON中提取业务错误：
+// 钉钉/企业微信用errcode，飞书新版用code，飞书旧版用StatusCode；非零即业务失败
+// 找到第一个业务码字段即停止：0→成功，非0→附平台返回的msg便于直接定位问题
+// 响应体不含任何业务码字段时视为成功（无从校验，避免对兼容网关误重试）
+fn business_error(v: &serde_json::Value) -> Option<String> {
+    for field in ["errcode", "code", "StatusCode"] {
+        if let Some(code) = v.get(field).and_then(|c| c.as_i64()) {
+            if code == 0 {
+                return None;
+            }
+            let msg = ["errmsg", "msg", "StatusMessage"]
+                .iter()
+                .copied()
+                .find_map(|k| v.get(k).and_then(|m| m.as_str()))
+                .unwrap_or("无错误详情");
+            return Some(format!("{}={}，{}", field, code, msg));
+        }
+    }
+    None
 }
 
 // 重试退避策略：失败后1s/5s/30s/2m/5m各重试一次（共5次重试+1次首发）
@@ -253,5 +289,89 @@ mod tests {
         let r = NotifyEngine::try_post(&client, "http://127.0.0.1:9/hook", &body, "飞书").await;
         let err = r.expect_err("端口9应连接失败");
         assert!(err.contains("请求错误"), "错误应标注来源: {err}");
+    }
+
+    #[test]
+    fn business_error_detects_nonzero_errcode() {
+        // 钉钉/企微形态：HTTP 200 + errcode!=0（签名错/关键词不符的典型返回）
+        let v = serde_json::json!({"errcode": 310000, "errmsg": "sign not match"});
+        let err = super::business_error(&v).expect("errcode!=0应识别为业务错误");
+        assert!(err.contains("310000"), "应包含业务码: {err}");
+        assert!(err.contains("sign not match"), "应包含平台错误详情: {err}");
+    }
+
+    #[test]
+    fn business_error_zero_errcode_is_success() {
+        let v = serde_json::json!({"errcode": 0, "errmsg": "ok"});
+        assert!(super::business_error(&v).is_none(), "errcode=0应视为成功");
+    }
+
+    #[test]
+    fn business_error_detects_feishu_code_field() {
+        // 飞书新版用code，错误详情在msg
+        let v = serde_json::json!({"code": 19021, "msg": "Sign match fail"});
+        let err = super::business_error(&v).expect("code!=0应识别为业务错误");
+        assert!(
+            err.contains("19021") && err.contains("Sign match fail"),
+            "应包含业务码与详情: {err}"
+        );
+    }
+
+    #[test]
+    fn business_error_ignores_body_without_code_field() {
+        // 无业务码字段的响应体无从校验，按成功处理
+        assert!(super::business_error(&serde_json::json!({"ok": true})).is_none());
+        assert!(super::business_error(&serde_json::json!({"message": "fine"})).is_none());
+    }
+
+    // 本地假webhook：返回给定的HTTP响应文本，供try_post端到端验证业务码判定
+    fn spawn_fake_webhook(response: String) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                // 必须先读请求再回响应：带着未读数据关闭socket会触发RST，
+                // 抢在客户端读取响应之前把连接打断（Windows下尤其明显）
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        addr
+    }
+
+    fn canned_200(resp_body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            resp_body.len(),
+            resp_body
+        )
+    }
+
+    #[tokio::test]
+    async fn try_post_fails_on_2xx_with_business_error() {
+        use std::time::Duration;
+        use reqwest::Client;
+        // HTTP 200但errcode非零：旧实现会误判成功导致告警静默丢失，必须报错并触发重试
+        let addr = spawn_fake_webhook(canned_200(r#"{"errcode":310000,"errmsg":"sign not match"}"#));
+        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        let body = serde_json::json!({"msgtype": "text", "text": {"content": "t"}});
+        let r = NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
+        let err = r.expect_err("200+errcode!=0应判为业务失败");
+        assert!(err.contains("业务错误"), "应标注为业务错误: {err}");
+        assert!(err.contains("310000"), "应包含业务码: {err}");
+    }
+
+    #[tokio::test]
+    async fn try_post_succeeds_on_2xx_with_zero_errcode() {
+        use std::time::Duration;
+        use reqwest::Client;
+        let addr = spawn_fake_webhook(canned_200(r#"{"errcode":0,"errmsg":"ok"}"#));
+        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        let body = serde_json::json!({"msgtype": "text", "text": {"content": "t"}});
+        let r = NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
+        assert!(r.is_ok(), "errcode=0应视为发送成功: {r:?}");
     }
 }

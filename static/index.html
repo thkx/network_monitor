@@ -217,15 +217,31 @@ function render(items) {
       <td>${m.last_response_time != null ? m.last_response_time + ' ms' : '—'}</td>
       <td class="muted">${m.last_check_at || '—'}</td>
       <td class="actions">
-        <button onclick="runOnce(${m.id})">▶ 运行</button>
-        <button onclick="showResults(${m.id}, '${esc(m.name)}')">📋 结果</button>
-        <button onclick="toggle(${m.id}, ${m.enabled})">${m.enabled === 1 ? '⏸ 停用' : '▶ 启用'}</button>
-        <button class="danger" onclick="removeMonitor(${m.id})">🗑</button>
+        <button data-act="run" data-id="${esc(m.id)}">▶ 运行</button>
+        <button data-act="results" data-id="${esc(m.id)}" data-name="${esc(m.name)}">📋 结果</button>
+        <button data-act="toggle" data-id="${esc(m.id)}" data-enabled="${esc(m.enabled)}">${m.enabled === 1 ? '⏸ 停用' : '▶ 启用'}</button>
+        <button class="danger" data-act="remove" data-id="${esc(m.id)}">🗑</button>
       </td>`;
     tb.appendChild(tr);
   }
   document.getElementById('updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
 }
+
+// 事件委托：表格内按钮动作一律通过data-act/data-id驱动，动态值不再拼进内联onclick
+// （此前showResults把监控名插值进onclick属性，HTML实体在属性解码后还原为引号，
+//   名字含');即可逃逸JS字符串造成存储型XSS；名称现在经data-name传递，只进textContent）
+document.querySelector('#statusTable tbody').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  if (!Number.isFinite(id)) return;
+  switch (btn.dataset.act) {
+    case 'run': runOnce(id); break;
+    case 'results': showResults(id, btn.dataset.name || ''); break;
+    case 'toggle': toggle(id, Number(btn.dataset.enabled)); break;
+    case 'remove': removeMonitor(id); break;
+  }
+});
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
