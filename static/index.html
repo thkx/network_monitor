@@ -290,6 +290,7 @@ function resetEditor() {
 async function editMonitor(id) {
   const panel = document.getElementById('newPanel');
   const errBox = document.getElementById('newErr');
+  editingId = null; // 先清编辑态：回源失败时保持新建模式，避免残留上一个编辑目标导致提交改错监控
   panel.classList.remove('hidden');
   panel.scrollIntoView({ behavior: 'smooth' });
   errBox.textContent = '';
