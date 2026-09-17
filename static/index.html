@@ -51,6 +51,8 @@
     position: fixed; inset: 0; background: rgba(6, 10, 14, 0.85);
     display: flex; align-items: center; justify-content: center; z-index: 100;
   }
+  /* ID选择器的display:flex优先级高于.hidden，须用复合选择器覆盖，否则浮层无法隐藏 */
+  #loginOverlay.hidden { display: none; }
   .login-card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 28px; width: 320px; display: flex; flex-direction: column; gap: 10px;
@@ -63,7 +65,7 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap hidden">
   <h1>网络监控器 · 控制台</h1>
   <div class="sub">采集 → 告警 → 指标：/metrics 为 Prometheus 端点；本页数据 5 秒自动刷新</div>
 
@@ -142,14 +144,21 @@ const EXAMPLE = {
 document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
 document.getElementById('newJson').value = JSON.stringify(EXAMPLE, null, 2);
 
-// 统一数据请求入口：401时弹出登录浮层（凭证由浏览器cookie自动携带）
+// 登录态守卫：未登录/已登出时所有API轮询一律不发，避免无意义的401请求
+// （认证未启用时首次refresh成功即视为已认证）
+let authed = false;
+
+// 统一数据请求入口：401时标记未认证并弹出登录浮层（凭证由浏览器cookie自动携带）
 async function api(url, opts) {
   const r = await fetch(url, opts);
-  if (r.status === 401) { showLogin(); throw new Error('需要登录'); }
+  if (r.status === 401) { authed = false; showLogin(); throw new Error('需要登录'); }
   return r;
 }
 
-function showLogin() { document.getElementById('loginOverlay').classList.remove('hidden'); }
+function showLogin() {
+  document.querySelector('.wrap').classList.add('hidden');
+  document.getElementById('loginOverlay').classList.remove('hidden');
+}
 
 async function doLogin() {
   const err = document.getElementById('loginErr');
@@ -164,6 +173,7 @@ async function doLogin() {
     });
     const j = await r.json();
     if (!r.ok) { err.textContent = j.message || ('HTTP ' + r.status); return; }
+    authed = true;
     document.getElementById('loginOverlay').classList.add('hidden');
     document.getElementById('loginPass').value = '';
     refresh(false);
@@ -172,6 +182,7 @@ async function doLogin() {
 
 async function logout() {
   try { await fetch('/logout', { method: 'POST' }); } catch (e) {}
+  authed = false; // 立即停掉API轮询，登出后不再用失效cookie打401
   showLogin();
 }
 
@@ -180,7 +191,10 @@ async function refresh(notify) {
     const r = await api(API.status);
     const j = await r.json();
     if (j.code !== 200) throw new Error(j.message);
+    authed = true; // 拉到数据 = 已登录或认证未启用
     render(j.data);
+    // 登录成功（或未启用认证）首次拉到数据后才展示主内容
+    document.querySelector('.wrap').classList.remove('hidden');
     if (notify) toast('已刷新');
   } catch (e) { toast('加载失败: ' + e.message, true); }
 }
@@ -287,10 +301,12 @@ function toast(msg, isErr) {
   const el = document.getElementById('updated');
   el.textContent = msg;
   el.style.color = isErr ? 'var(--fail)' : '';
-  setTimeout(() => { el.style.color = ''; refresh(false); }, isErr ? 2500 : 0);
+  setTimeout(() => { el.style.color = ''; if (authed) refresh(false); }, isErr ? 2500 : 0);
 }
 
-setInterval(() => { if (document.getElementById('autoRefresh').checked) refresh(false); }, 5000);
+// 自动刷新只在已认证时发请求；页面加载先探测一次：
+// 认证未启用→拿到数据进入轮询；启用→401弹浮层并保持静默
+setInterval(() => { if (authed && document.getElementById('autoRefresh').checked) refresh(false); }, 5000);
 refresh(false);
 </script>
 </body>
