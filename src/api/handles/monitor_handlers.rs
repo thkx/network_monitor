@@ -42,13 +42,20 @@ pub struct PageData<T: Serialize> {
     pub page_size: i64,
 }
 
+// 分页参数防御：page_no≥1，page_size限制在1..=500
+// （SQLite里LIMIT为负等价于无限制，page_size=-1即全表导出；超大值会整表拉进内存）
+pub(crate) fn clamp_pagination(page_no: Option<i64>, page_size: Option<i64>) -> (i64, i64) {
+    let no = page_no.unwrap_or(1).max(1);
+    let size = page_size.unwrap_or(20).clamp(1, 500);
+    (no, size)
+}
+
 // 获取全部的监控配置处理函数
 pub async fn get_all_monitors(
     monitor_service: web::Data<MonitorService>, // 设置统一的业务层的对象，进行相关的数据操作
     query: web::Query<PaginationParams>,        // 分页参数对象
 ) -> Result<HttpResponse, actix_web::Error> {
-    let no = query.page_no.unwrap_or(1);
-    let size = query.page_size.unwrap_or(20);
+    let (no, size) = clamp_pagination(query.page_no, query.page_size);
     // enabled参数可选：此前硬编码只查启用项，禁用的配置在列表里"消失"
     let (monitors, total) = match query.enabled {
         Some(flag) => monitor_service.get_monitors_by_enabled(flag, no, size),
@@ -116,10 +123,30 @@ pub async fn create_monitor(
     let entry = body.into_inner();
     validate_config(&entry)?;
     let insert: MonitorConfigInsert = build_monitor_insert(&entry);
-    let created = monitor_service.create_monitor(&insert).map_err(|e| {
-        // name唯一约束冲突等情况返回409，便于前端提示
-        actix_web::error::ErrorConflict(format!("Failed to create monitor: {}", e))
-    })?;
+    let created = match monitor_service.create_monitor(&insert) {
+        Ok(c) => c,
+        Err(e) => {
+            // 仅唯一约束冲突（name重复）返回409便于前端提示，错误体保持统一JSON形状；
+            // 其余（锁超时/磁盘满/连接池耗尽等）是服务端故障，归500避免误导调用方重试
+            if matches!(
+                &e,
+                diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                )
+            ) {
+                return Ok(HttpResponse::Conflict().json(DefaultResponseObj {
+                    code: 409,
+                    message: format!(
+                        "监控名称已存在: {}（按target/类型生成，请先删除同名配置）",
+                        crate::tools_types::display_name(&entry)
+                    ),
+                    data: serde_json::Value::Null,
+                }));
+            }
+            return Err(internal_error(e));
+        }
+    };
     // 热更新：整体重建监控任务，让新配置立即生效（无需重启进程）
     reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
@@ -444,6 +471,19 @@ mod tests {
     use super::validate_config;
     use crate::tools_types::SelfDefineMonitorConfig;
 
+    #[test]
+    fn pagination_is_clamped() {
+        use super::clamp_pagination;
+        // 缺省值
+        assert_eq!(clamp_pagination(None, None), (1, 20));
+        // 负数size在SQLite里等价LIMIT无限制（全表导出），必须夹到1
+        assert_eq!(clamp_pagination(Some(0), Some(-1)), (1, 1));
+        // 超大size夹到500上限
+        assert_eq!(clamp_pagination(Some(3), Some(100000)), (3, 500));
+        // 正常值原样通过
+        assert_eq!(clamp_pagination(Some(2), Some(50)), (2, 50));
+    }
+
     fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
         serde_json::from_str(json).expect("测试JSON应可反序列化")
     }
@@ -539,6 +579,50 @@ mod tests {
             r#"{"target":"x","monitor_type":"CPU","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[{"rule_type":"THRESHOLD","condition":{"threshold":{"metric":"cpu","op":">=","value":80}}}]}}"#,
         );
         assert!(validate_config(&good).is_ok());
+    }
+
+    // 重复创建：name由target生成且库里有唯一约束，冲突必须映射409而非500
+    #[actix_web::test]
+    async fn duplicate_name_create_returns_409() {
+        use super::{create_monitor, DefaultResponseObj};
+        use actix_web::web;
+        use crate::database::connect_db::test_pool;
+        use crate::database::repositories::monitor_repo::MonitorRepository;
+        use crate::database::services::monitor_service::MonitorService;
+        use crate::scheduler::Scheduler;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        let scheduler = Arc::new(Mutex::new(Scheduler::new(pool.clone(), 5)));
+
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(monitor_service.clone()))
+                .app_data(web::Data::new(scheduler.clone()))
+                .route("/api/monitors", web::post().to(create_monitor)),
+        )
+        .await;
+
+        let body = r#"{"target":"https://dup.example.com","monitor_type":"HTTP","interval":10}"#;
+        let send = |body: &'static str| {
+            actix_web::test::TestRequest::post()
+                .uri("/api/monitors")
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(body.to_string())
+                .to_request()
+        };
+        let resp = actix_web::test::call_service(&app, send(body)).await;
+        assert_eq!(resp.status(), 200, "首次创建应成功");
+
+        // 同target重复创建：唯一约束冲突 → 409（此前一切创建错误都被误分类为409，
+        // 现在只有UniqueViolation返回409，但此用例验证正向路径仍然正确）
+        let resp = actix_web::test::call_service(&app, send(body)).await;
+        assert_eq!(resp.status(), 409, "重复创建应返回409");
+        let err: DefaultResponseObj<serde_json::Value> =
+            actix_web::test::read_body_json(resp).await;
+        assert!(err.message.contains("已存在"), "错误消息应指明名称冲突");
     }
 
     // 控制台两个新端点的端到端测试：临时库 + 内存App

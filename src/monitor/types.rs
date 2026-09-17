@@ -19,6 +19,7 @@ pub struct MonitorConfig {
     pub target: Option<String>,       // 监控的目标URL或IP地址
     pub interval: Option<u64>,        // 监控间隔，单位秒
     pub monitor_type: MonitorType,    // 监控类型 HTTP TCP FTP等等
+    pub timeout: u64,                 // 检查超时时间，单位毫秒（此前只在HTTP详情里，命令类监控拿不到）
     pub details: MonitorConfigDetail, // 这里的话是不同监控类型的具体参数，跟公共的一些参数区分开 详见14行代码声明
 }
 
@@ -27,6 +28,8 @@ impl MonitorConfig {
     // default_interval：配置项未指定interval时使用的默认监控间隔（来自命令行参数）
     pub fn from_entry(entry: &SelfDefineMonitorConfig, default_interval: u64) -> Self {
         let monitor_type = entry.monitor_type;
+        // 检查超时（毫秒）：全类型共用，HTTP用于请求超时，命令类用于兜底kill
+        let timeout_ms = entry.timeout.unwrap_or(5000);
         // 按监控类型构建各自的详情参数
         let details = match monitor_type {
             MonitorType::Http => {
@@ -124,7 +127,7 @@ impl MonitorConfig {
                 MonitorConfigDetail::Http(HttpMonitorConfig {
                     url,
                     method,
-                    timeout: entry.timeout.unwrap_or(5000),
+                    timeout: timeout_ms,
                     headers,
                     body,
                     rules: entry.content_evaluation_rules.clone(),
@@ -148,6 +151,7 @@ impl MonitorConfig {
             target: entry.target.clone(),
             interval: Some(entry.interval.unwrap_or(default_interval)),
             monitor_type,
+            timeout: timeout_ms,
             details,
         }
     }

@@ -203,6 +203,7 @@ mod tests {
             target: Some(format!("127.0.0.1:{}", addr.port())),
             interval: Some(60),
             monitor_type: MonitorType::Ftp,
+            timeout: 5000,
             details: crate::monitor::types::MonitorConfigDetail::Ftp(
                 crate::monitor::types::FtpMonitorConfig {},
             ),

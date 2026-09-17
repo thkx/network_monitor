@@ -1,6 +1,8 @@
 use super::monitor_trait::Monitor;
 use super::types::{CheckResultDetail, MonitorConfig, TracerouteMonitorResult};
 use crate::tools_types::MonitorType;
+use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
 pub struct TracerouteMonitor {}
@@ -25,36 +27,52 @@ impl Monitor for TracerouteMonitor {
         let target = config.target.as_ref().unwrap();
         // 调用系统自带的 tracert 命令实现路由追踪（Windows平台参数）
         // -d 不对跳点做反向域名解析（加快速度），-h 15 最大跃点数，-w 1000 每次探测等待超时1秒
+        // 外层兜底超时：15跳×每跳3探测×1秒≈45秒是正常上界，取max(config.timeout, 60秒)，
+        // 只防子进程异常挂起（此前output().await无兜底，挂起会让任务永久失明）
+        let guard = Duration::from_millis(config.timeout.max(60_000));
         // 路由追踪：Windows用tracert；Unix优先tracepath（免安装、免root），命令不存在时退回traceroute
         let mut success = false;
         let mut hops: Vec<String> = vec![];
-        let output = if cfg!(target_os = "windows") {
-            // -d 不做反向域名解析，-h 15 最大跃点数，-w 1000 每次探测等待超时1秒
-            Command::new("tracert")
-                .args(["-d", "-h", "15", "-w", "1000"])
-                .arg(target.as_str())
-                .output()
-                .await
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("tracert");
+            c.args(["-d", "-h", "15", "-w", "1000"]);
+            c
         } else {
-            match Command::new("tracepath")
-                .args(["-m", "15"])
-                .arg(target.as_str())
-                .output()
-                .await
-            {
-                Ok(o) => Ok(o),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // traceroute 参数：-n 不解析域名，-m 15 最大跃点数，-w 1 每跳超时1秒
-                    Command::new("traceroute")
-                        .args(["-n", "-m", "15", "-w", "1"])
-                        .arg(target.as_str())
-                        .output()
-                        .await
-                }
-                Err(e) => Err(e),
-            }
+            let mut c = Command::new("tracepath");
+            c.args(["-m", "15"]);
+            c
         };
-        if let Ok(output) = output {
+        cmd.arg(target.as_str())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true); // 外层超时取消future时子进程随之被kill
+        let spawned = cmd.spawn();
+        // spawn失败且是命令不存在：Unix上回退traceroute重试一次（同样带kill_on_drop与兜底超时）
+        let output = match spawned {
+            Ok(child) => tokio::time::timeout(guard, child.wait_with_output())
+                .await
+                .ok()
+                .and_then(|r| r.ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // traceroute 参数：-n 不解析域名，-m 15 最大跃点数，-w 1 每跳超时1秒
+                let fallback = Command::new("traceroute")
+                    .args(["-n", "-m", "15", "-w", "1"])
+                    .arg(target.as_str())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn();
+                match fallback {
+                    Ok(child) => tokio::time::timeout(guard, child.wait_with_output())
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok()),
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        };
+        if let Some(output) = output {
             // 逐行解析输出，保留以数字开头的跃点行（跳过头部说明和空行）
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {

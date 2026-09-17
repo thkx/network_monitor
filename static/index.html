@@ -72,7 +72,7 @@
   <div class="bar">
     <label><input type="checkbox" id="autoRefresh" checked> 自动刷新（5s）</label>
     <button onclick="refresh(true)">手动刷新</button>
-    <button onclick="togglePanel('newPanel')">＋ 新建监控</button>
+    <button onclick="openNewPanel()">＋ 新建监控</button>
     <span id="updated" class="muted"></span>
     <button onclick="logout()" style="margin-left:auto">⎋ 退出登录</button>
   </div>
@@ -88,13 +88,13 @@
   </table>
 
   <div id="newPanel" class="card hidden">
-    <h2>新建监控（SelfDefineMonitorConfig JSON）</h2>
+    <h2 id="newTitle">新建监控（SelfDefineMonitorConfig JSON）</h2>
     <details open><summary>示例：HTTP 监控 + 可用性告警（点击折叠）</summary>
       <div id="example" style="color:var(--muted);font:12px Consolas,monospace;white-space:pre-wrap;margin:6px 0;"></div>
     </details>
     <textarea id="newJson" spellcheck="false"></textarea>
     <div class="bar" style="margin-top:10px">
-      <button class="primary" onclick="createMonitor()">提交创建</button>
+      <button class="primary" id="submitBtn" onclick="submitMonitorForm()">提交创建</button>
       <span class="muted">alert_rules 可省略；consecutive_failures/successes 为防抖参数</span>
     </div>
     <div id="newErr" class="err"></div>
@@ -126,6 +126,8 @@
 <script>
 const API = {
   status:   '/api/status',
+  get:      id => `/api/monitors/${id}`,
+  update:   id => `/api/monitors/${id}`,
   run:   id => `/api/monitors/${id}/run`,
   toggle:   id => `/api/monitors/${id}/enabled`,
   del:      id => `/api/monitors/${id}`,
@@ -219,6 +221,7 @@ function render(items) {
       <td class="actions">
         <button data-act="run" data-id="${esc(m.id)}">▶ 运行</button>
         <button data-act="results" data-id="${esc(m.id)}" data-name="${esc(m.name)}">📋 结果</button>
+        <button data-act="edit" data-id="${esc(m.id)}">✎ 编辑</button>
         <button data-act="toggle" data-id="${esc(m.id)}" data-enabled="${esc(m.enabled)}">${m.enabled === 1 ? '⏸ 停用' : '▶ 启用'}</button>
         <button class="danger" data-act="remove" data-id="${esc(m.id)}">🗑</button>
       </td>`;
@@ -238,6 +241,7 @@ document.querySelector('#statusTable tbody').addEventListener('click', e => {
   switch (btn.dataset.act) {
     case 'run': runOnce(id); break;
     case 'results': showResults(id, btn.dataset.name || ''); break;
+    case 'edit': editMonitor(id); break;
     case 'toggle': toggle(id, Number(btn.dataset.enabled)); break;
     case 'remove': removeMonitor(id); break;
   }
@@ -248,21 +252,57 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 
 function togglePanel(id) { document.getElementById(id).classList.toggle('hidden'); }
 
-async function createMonitor() {
+async function submitMonitorForm() {
   const errBox = document.getElementById('newErr');
   errBox.textContent = '';
   try {
     const body = JSON.parse(document.getElementById('newJson').value);
-    const r = await api('/api/monitors', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    // editingId为null走新建POST，否则走编辑PUT（enabled状态由服务端保持不变）
+    const r = await api(editingId ? API.update(editingId) : '/api/monitors', {
+      method: editingId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     const j = await r.json();
     if (!r.ok) { errBox.textContent = `HTTP ${r.status}\n` + JSON.stringify(j, null, 2); return; }
-    toast('创建成功');
+    toast(editingId ? '已更新' : '创建成功');
     document.getElementById('newPanel').classList.add('hidden');
     refresh(false);
   } catch (e) { errBox.textContent = 'JSON 解析失败: ' + e.message; }
+}
+
+// ---- 新建/编辑共用面板 ----
+let editingId = null; // null=新建模式；数字=编辑模式（monitor id）
+
+function openNewPanel() {
+  resetEditor();
+  document.getElementById('newPanel').classList.toggle('hidden');
+}
+
+function resetEditor() {
+  editingId = null;
+  document.getElementById('newTitle').textContent = '新建监控（SelfDefineMonitorConfig JSON）';
+  document.getElementById('submitBtn').textContent = '提交创建';
+  document.getElementById('newJson').value = JSON.stringify(EXAMPLE, null, 2);
+  document.getElementById('newErr').textContent = '';
+}
+
+// 进入编辑模式：/api/status聚合视图不含config_json，需按id回源拉完整配置
+async function editMonitor(id) {
+  const panel = document.getElementById('newPanel');
+  const errBox = document.getElementById('newErr');
+  panel.classList.remove('hidden');
+  panel.scrollIntoView({ behavior: 'smooth' });
+  errBox.textContent = '';
+  try {
+    const r = await api(API.get(id));
+    const j = await r.json();
+    if (j.code !== 200) throw new Error(j.message);
+    const cfg = j.data.config_json ? JSON.parse(j.data.config_json) : {};
+    editingId = id;
+    document.getElementById('newTitle').textContent = `编辑监控 #${id}`;
+    document.getElementById('submitBtn').textContent = '保存修改';
+    document.getElementById('newJson').value = JSON.stringify(cfg, null, 2);
+  } catch (e) { errBox.textContent = '加载配置失败: ' + e.message; }
 }
 
 async function runOnce(id) {

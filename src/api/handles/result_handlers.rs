@@ -16,8 +16,7 @@ pub async fn get_check_results(
     result_service: web::Data<ResultService>,
     query: web::Query<ResultQueryParams>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let no = query.page_no.unwrap_or(1);
-    let size = query.page_size.unwrap_or(20);
+    let (no, size) = super::monitor_handlers::clamp_pagination(query.page_no, query.page_size);
     let (list, total) = result_service
         .get_check_results(query.monitor_id, no, size)
         .map_err(|e| {
