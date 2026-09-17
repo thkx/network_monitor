@@ -34,7 +34,8 @@ impl NotifyEngine {
                 };
                 let cfg = email_cfg.clone();
                 // 主题按消息性质区分：恢复通知与告警在邮箱里一眼可分
-                let subject = if message.starts_with("[监控恢复]") {
+                // （前缀为engine共享常量，见alerts::RECOVERY_PREFIX）
+                let subject = if message.starts_with(super::RECOVERY_PREFIX) {
                     "网络监控恢复通知"
                 } else {
                     "网络监控告警通知"

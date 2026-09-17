@@ -6,3 +6,7 @@ mod engine;
 mod notify;
 
 pub use engine::AlertsEngine;
+
+/// 恢复通知消息前缀：engine构造恢复消息与notify EMAIL主题判别的共享约定。
+/// 常量化防止两处字符串字面量各自漂移（主题分类会静默错位）
+pub(crate) const RECOVERY_PREFIX: &str = "[监控恢复]";

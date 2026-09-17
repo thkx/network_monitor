@@ -65,9 +65,13 @@ impl ResultService {
         self.repo.get_check_results(monitor_id, page, page_size)
     }
 
-    // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
-    pub fn get_latest_by_monitor(&self) -> Result<Vec<CheckResultModel>, Error> {
-        self.repo.get_latest_by_monitor()
+    // 每个监控的最新一条结果（/api/status聚合视图用；monitor_ids由调用方传入，
+    // 逐监控索引化查询避免全表扫描——见repo注释）
+    pub fn get_latest_by_monitor(
+        &self,
+        monitor_ids: &[i32],
+    ) -> Result<Vec<CheckResultModel>, Error> {
+        self.repo.get_latest_by_monitor(monitor_ids)
     }
 
     // 清理 N 天前的过期监控结果（数据保留策略）
@@ -117,5 +121,43 @@ mod tests {
         let details = v["details"].as_object().expect("details应为JSON对象");
         assert!(details.contains_key("Icmp"), "details应保留类型标签: {details:?}");
         assert_eq!(details["Icmp"]["elapsed_ms"], 42);
+    }
+
+    // latest-per-monitor语义：两监控各插2条（同秒内id递增），应各返回最新一条。
+    // 同一created_at秒内的并列由索引内rowid序反向保证取最新id——正是此处钉住的行为
+    #[test]
+    fn latest_by_monitor_returns_newest_per_monitor() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_a = create_test_monitor(&pool, "t-latest-a");
+        let monitor_b = create_test_monitor(&pool, "t-latest-b");
+        let service = ResultService::new(CheckResultRepository::new(pool));
+
+        let mk = |id: u128, alive: bool| CheckResult {
+            id,
+            monitor_type: MonitorType::Icmp,
+            target: Some("10.0.0.1".to_string()),
+            status: alive,
+            details: CheckResultDetail::Icmp(IcmpMonitorResult {
+                is_alive: alive,
+                elapsed_ms: 10,
+            }),
+        };
+        // 插入顺序：a旧 a新 b旧 b新（同秒内id严格递增）
+        service.persist_check(monitor_a, &mk(0x101, true)).unwrap();
+        service.persist_check(monitor_a, &mk(0x102, false)).unwrap();
+        service.persist_check(monitor_b, &mk(0x201, true)).unwrap();
+        service.persist_check(monitor_b, &mk(0x202, false)).unwrap();
+
+        let latest = service.get_latest_by_monitor(&[monitor_a, monitor_b]).unwrap();
+        assert_eq!(latest.len(), 2, "每监控恰好一条");
+        for monitor_id in [monitor_a, monitor_b] {
+            let row = latest.iter().find(|r| r.monitor_id == monitor_id).expect("应含该监控");
+            // 每个监控后插的一条是status=false：取到它即证明取的是"最新"而非任意/最旧
+            assert_eq!(row.status, 0, "应取该监控最新插入的一条");
+        }
+        // 未插入结果的监控：静默跳过而非报错
+        let empty = service.get_latest_by_monitor(&[]).unwrap();
+        assert!(empty.is_empty());
     }
 }

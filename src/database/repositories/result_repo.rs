@@ -49,17 +49,30 @@ impl CheckResultRepository {
     }
 
     // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
-    // 两段式类型安全查询：先取各monitor_id的最大结果id，再取回这些行
-    pub fn get_latest_by_monitor(&self) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
+    // 逐监控索引化查询：WHERE monitor_id = ? ORDER BY created_at DESC LIMIT 1
+    // 走 (monitor_id, created_at) 复合索引反向扫描，O(log n)/监控。
+    // 此前 GROUP BY monitor_id + max(id) 形态需全表扫描，而本查询挂在登录控制台
+    // 每5秒轮询的/api/status上——check_result保留期内可达百万行，不可接受。
+    // 同一created_at秒内的并列由索引内rowid序（id为rowid别名）反向保证取最新id，
+    // 与旧max(id)语义等价
+    pub fn get_latest_by_monitor(
+        &self,
+        monitor_ids: &[i32],
+    ) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
+        use diesel::OptionalExtension;
         let mut conn = get_connection(&self.pool);
-        let max_ids: Vec<Option<i32>> = check_result::table
-            .group_by(check_result::monitor_id)
-            .select(diesel::dsl::max(check_result::id))
-            .load(&mut conn)?;
-        let ids: Vec<i32> = max_ids.into_iter().flatten().collect();
-        check_result::table
-            .filter(check_result::id.eq_any(ids))
-            .load::<CheckResultModel>(&mut conn)
+        let mut latest = Vec::with_capacity(monitor_ids.len());
+        for mid in monitor_ids {
+            if let Some(row) = check_result::table
+                .filter(check_result::monitor_id.eq(*mid))
+                .order_by(check_result::created_at.desc())
+                .first::<CheckResultModel>(&mut conn)
+                .optional()?
+            {
+                latest.push(row);
+            }
+        }
+        Ok(latest)
     }
 
     // 分页查询监控结果（monitor_id为None时查询全部）

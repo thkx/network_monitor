@@ -324,8 +324,8 @@ fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Err
     }
     // 告警配置校验：防抖参数范围 + 通知渠道专项 + THRESHOLD规则的阈值条件
     if let Some(cfg) = entry.alert_rules.as_ref() {
-        // 渠道专项校验：EMAIL必须带SMTP配置且收件人非空；SMS未实现，显式拒绝
-        // （避免"接受了配置却永远只打日志"的静默丢通知）
+        // 渠道专项校验：EMAIL必须带SMTP配置且收件人非空；SMS未实现，显式拒绝；
+        // webhook渠道URL必填——避免"接受了配置却永远发送失败重试"的无效配置
         match cfg.notify_type.to_uppercase().as_str() {
             "EMAIL" => {
                 let Some(email) = cfg.notify_config.email.as_ref() else {
@@ -342,6 +342,13 @@ fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Err
             "SMS" => {
                 return Err(actix_web::error::ErrorBadRequest(
                     "SMS 通知暂未实现，请使用 FEISHU / DINGTALK / WECOM / EMAIL",
+                ));
+            }
+            "FEISHU" | "DINGTALK" | "WECOM"
+                if cfg.notify_config.webhook_url.trim().is_empty() =>
+            {
+                return Err(actix_web::error::ErrorBadRequest(
+                    "webhook 渠道必须配置 notify_config.webhook_url",
                 ));
             }
             _ => {}
@@ -399,19 +406,33 @@ pub async fn get_console_status(
     result_service: web::Data<ResultService>,
     pool: web::Data<Arc<SqlitePool>>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    // 全量DB读取挪阻塞池：此端点是登录控制台每5秒轮询的最高频DB调用，
+    // 同步diesel在worker线程执行会卡runtime（与flush/清理/reload同款规则）。
     // 全量读取而非分页接口硬编码1000上限：配置超过1000时状态页不再静默截尾
-    let monitors = monitor_service.get_all_monitors().map_err(internal_error)?;
-    let latest: Vec<CheckResultModel> = result_service
-        .get_latest_by_monitor()
-        .map_err(internal_error)?;
+    let (monitors, latest, alerting) = web::block({
+        let monitor_service = monitor_service.get_ref().clone();
+        let result_service = result_service.get_ref().clone();
+        let pool = pool.get_ref().clone();
+        move || -> Result<_, diesel::result::Error> {
+            let monitors = monitor_service.get_all_monitors()?;
+            let monitor_ids: Vec<i32> = monitors.iter().map(|m| m.id).collect();
+            // latest_per_monitor逐监控索引化查询（走复合索引），不再全表扫描
+            let latest = result_service.get_latest_by_monitor(&monitor_ids)?;
+            // 查库失败降级为空快照：状态页仍可展示，只是alerting全为false
+            let alerting = AlertStateRepository::new(pool)
+                .get_all_alerting()
+                .unwrap_or_default();
+            Ok((monitors, latest, alerting))
+        }
+    })
+    .await
+    .map_err(|e| {
+        actix_web::error::ErrorInternalServerError(format!("状态读取阻塞任务失败: {e}"))
+    })?
+    .map_err(internal_error)?;
     let latest_map: HashMap<i32, &CheckResultModel> =
         latest.iter().map(|r| (r.monitor_id, r)).collect();
-    // 查库失败降级为空快照：状态页仍可展示，只是alerting全为false
-    let alert_map: HashMap<i32, bool> = AlertStateRepository::new(pool.get_ref().clone())
-        .get_all_alerting()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let alert_map: HashMap<i32, bool> = alerting.into_iter().collect();
     let items: Vec<MonitorStatusItem> = monitors
         .iter()
         .map(|m| {

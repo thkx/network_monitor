@@ -32,3 +32,16 @@ jobs:
 
       - name: 测试
         run: cargo test
+
+  docker-build:
+    # 镜像构建验证（不推送）：Dockerfile此前只在打tag的release job里
+    # 第一次真正执行——首次运行即发布现场。让"镜像能否构建"成为PR门槛
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建镜像验证
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false

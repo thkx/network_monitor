@@ -290,7 +290,10 @@ pub struct AlertVerificationRules {
 /// 告警通知渠道配置
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NotifyConfig {
-    pub webhook_url: String, // Webhook地址
+    /// Webhook地址：FEISHU/DINGTALK/WECOM渠道必填（validate_config校验非空），
+    /// EMAIL渠道不使用——serde(default)使其无需填占位值
+    #[serde(default)]
+    pub webhook_url: String,
     /// 签名密钥（可选）：FEISHU/DINGTALK 后台开启"签名校验"时必填，
     /// 引擎自动计算签名——飞书附加到请求体，钉钉自动拼接到 webhook_url
     #[serde(default)]

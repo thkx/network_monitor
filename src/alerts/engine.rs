@@ -103,7 +103,8 @@ impl AlertsEngine {
                     let target = check_result.target.clone().unwrap_or_default();
                     self.notify
                         .send_alert_message(format!(
-                            "[监控恢复] target: {} | {} | 异常已恢复（{}）",
+                            "{} target: {} | {} | 异常已恢复（{}）",
+                            super::RECOVERY_PREFIX,
                             target,
                             check_result.monitor_type,
                             detail_summary(&check_result.details)

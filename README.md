@@ -171,6 +171,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - `ADMIN_PASSWORD` 设置后：除控制台静态页与 `/login` 外的所有路由要求登录
   （HttpOnly 会话 cookie，12 小时有效，进程重启后需重新登录）
 - 登录失败按 IP 限流：连续 5 次失败锁定 60 秒（限流检查与失败计数在同一次加锁内原子完成，并发突发不会放大上限；失败记录定期清扫并有容量上限）
+  - **反向代理部署注意**：限流按 `peer_addr`（即代理 IP）计数，所有经同一代理的客户端共享一个限流桶。程序故意不信任 `X-Forwarded-For`（该头可被客户端伪造，采信等于限流失效）；如需按真实客户端限流，应在代理层实现
 - 密码比较使用 SHA-256 摘要常数时间对比（subtle）；凭证仅存于环境变量，不落库
 - 会话 cookie 为 HttpOnly + SameSite=Lax；`COOKIE_SECURE=1` 时附加 Secure 标志（HTTPS 部署时开启）
 - `/metrics`：配置 `METRICS_TOKEN` 后 Prometheus 需以 `bearer_token` 方式抓取：
