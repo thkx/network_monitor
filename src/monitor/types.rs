@@ -245,7 +245,7 @@ impl CheckResult {
             CheckResultDetail::Tcp(r) => (r.connected, r.elapsed_ms, None),
             CheckResultDetail::Udp(r) => (r.response_received, r.elapsed_ms, None),
             CheckResultDetail::Dns(r) => (r.resolved, r.elapsed_ms, None),
-            CheckResultDetail::Ftp(r) => (r.connected, r.elapsed_ms, None),
+            CheckResultDetail::Ftp(r) => (r.available(), r.elapsed_ms, r.last_code),
             CheckResultDetail::Traceroute(r) => (r.success, 0, None),
             _ => (self.status, 0, None),
         }
@@ -274,9 +274,24 @@ pub enum CheckResultDetail {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FtpMonitorResult {
-    pub connected: bool,        // FTP连接是否成功
-    pub banner: Option<String>, // 服务端返回的欢迎横幅信息
-    pub elapsed_ms: u128,       // 连接耗时，单位毫秒
+    pub connected: bool,           // TCP连接是否成功
+    pub banner: Option<String>,    // 服务端返回的欢迎横幅信息
+    // FTP协议握手是否完成：横幅+USER命令均收到合法的三位响应码。
+    // 认证被拒（如530）也算握手完成——服务在正常讲FTP；仅吐banner或
+    // 回应非协议内容的"恰好开了21端口的TCP服务"为false
+    pub handshake_ok: bool,
+    // 匿名登录是否成功（PASS最终响应2xx）；未开放匿名登录时为false，但握手仍可正常
+    pub logged_in: bool,
+    pub last_code: Option<u16>, // 最后一次收到的FTP响应码
+    pub elapsed_ms: u128,       // 总耗时，单位毫秒
+}
+
+impl FtpMonitorResult {
+    // 可用性：连接成功且FTP命令交互完成——验证的是协议在正常工作，
+    // 而非仅"端口开着"（与TCP监控区分开）
+    pub fn available(&self) -> bool {
+        self.connected && self.handshake_ok
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -337,8 +352,11 @@ pub struct IcmpMonitorResult {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UdpMonitorResult {
     pub sent: bool,              // 探测包是否发送成功
-    pub response_received: bool, // 是否收到UDP响应
+    pub response_received: bool, // 是否收到响应（DNS模式下=收到事务ID匹配的合法应答）
     pub elapsed_ms: u128,        // 往返耗时，单位毫秒
+    // 是否按DNS语义探测（端口53：发送真实DNS查询并校验应答）。
+    // 其余UDP端口没有通用"ping"协议，仅检测目标是否返回任意数据，配置时需知悉
+    pub dns_mode: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

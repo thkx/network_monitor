@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **12 种监控类型**：HTTP、ICMP(ping)、TCP、UDP、DNS、FTP、TRACEROUTE(tracert)、CPU、MEMORY、DISK、PROCESS
+- **12 种监控类型**：HTTP、ICMP(ping)、TCP、UDP（53端口按DNS协议语义探测并校验应答，其余端口仅检测任意回包）、DNS、FTP（匿名登录握手，验证协议可用而非仅端口开放）、TRACEROUTE(tracert)、CPU、MEMORY、DISK、PROCESS
 - **三种运行模式**：
   - `once` — 对 monitor_list.json 中的配置各执行一次探测
   - `monitor --interval N` — 按 N 秒间隔持续探测（无持久化）

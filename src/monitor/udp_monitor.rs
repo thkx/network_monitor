@@ -13,7 +13,12 @@ impl UdpMonitor {
     }
 }
 
-// 用来让trait中的异步方法可用，详细的请查看Q&A
+// UDP探测的诚实边界：
+// - 端口53（DNS）按DNS协议语义探测：构造真实A查询，应答须匹配事务ID且QR=1，
+//   这是真实的协议交互，健康检查结果可信；
+// - 其余UDP端口没有通用的"ping"协议，只能发送载荷并等待任意回包——
+//   静默丢弃未知载荷的服务（大多数UDP服务如此）会被判无响应，
+//   因此UDP监控仅对有应答语义的服务（回显、自定义协议等）有意义，配置时需知悉。
 #[async_trait::async_trait]
 impl Monitor for UdpMonitor {
     async fn check(&self, config: &MonitorConfig) -> (bool, CheckResultDetail) {
@@ -30,30 +35,50 @@ impl Monitor for UdpMonitor {
                 return (false, CheckResultDetail::Udp(UdpMonitorResult::default()));
             }
         };
+        // 端口53走DNS语义；host为域名时查询该域名自身，是IP时查询localhost
+        let dns_mode = port == 53;
+        let qname = if host.parse::<std::net::IpAddr>().is_err() {
+            host.as_str()
+        } else {
+            "localhost"
+        };
         let start = Instant::now();
         let mut sent = false; // 是否成功发送探测包
-        let mut response_received = false; // 是否收到响应
+        let mut response_received = false; // 是否收到（有效的）响应
         // 先把目标地址解析为 SocketAddr
         if let Ok(mut addrs) = tokio::net::lookup_host((host.as_str(), port)).await
-            && let Some(addr) = addrs.next() {
-                // 绑定一个随机本地端口用于发送和接收
-                if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
-                    // 发送一个探测包
-                    if socket.send_to(b"ping", addr).await.is_ok() {
-                        sent = true;
-                        let mut buf = [0u8; 1024];
-                        // 等待响应，最多等待3秒
-                        if let Ok(res) = tokio::time::timeout(
-                            std::time::Duration::from_secs(3),
-                            socket.recv_from(&mut buf),
-                        )
-                        .await
-                        {
-                            response_received = res.is_ok();
-                        }
+            && let Some(addr) = addrs.next()
+        {
+            // 绑定一个随机本地端口用于发送和接收
+            if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
+                // DNS模式发送真实查询报文；其余端口发送简单载荷等任意回包
+                let txid = uuid::Uuid::new_v4().as_u128() as u16;
+                let payload = if dns_mode {
+                    build_dns_query(txid, qname)
+                } else {
+                    b"ping".to_vec()
+                };
+                if socket.send_to(&payload, addr).await.is_ok() {
+                    sent = true;
+                    let mut buf = [0u8; 1024];
+                    // 等待响应，最多等待3秒
+                    if let Ok(Ok((n, _))) = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        socket.recv_from(&mut buf),
+                    )
+                    .await
+                    {
+                        // DNS模式下校验：事务ID匹配 + QR位=1（是应答而非查询），
+                        // 排除端口上无关服务/反射干扰的噪声报文
+                        response_received = if dns_mode {
+                            is_valid_dns_reply(&buf[..n], txid)
+                        } else {
+                            true
+                        };
                     }
                 }
             }
+        }
         let elapsed_ms = start.elapsed().as_millis();
         (
             true,
@@ -61,11 +86,71 @@ impl Monitor for UdpMonitor {
                 sent,
                 response_received,
                 elapsed_ms,
+                dns_mode,
             }),
         )
     }
 
     fn get_type(&self) -> MonitorType {
         MonitorType::Udp
+    }
+}
+
+// 构造最小DNS查询报文（RFC 1035）：随机事务ID + 标准查询标志（RD=1）+ 单条A/IN问题
+fn build_dns_query(txid: u16, qname: &str) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(12 + qname.len() + 6);
+    pkt.extend_from_slice(&txid.to_be_bytes());
+    pkt.extend_from_slice(&[0x01, 0x00]); // flags: 标准查询，RD=1
+    pkt.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // QDCOUNT=1，其余0
+    for label in qname.split('.').filter(|s| !s.is_empty()) {
+        pkt.push(label.len() as u8);
+        pkt.extend_from_slice(label.as_bytes());
+    }
+    pkt.push(0); // 根标签结束
+    pkt.extend_from_slice(&[0, 1]); // QTYPE=A
+    pkt.extend_from_slice(&[0, 1]); // QCLASS=IN
+    pkt
+}
+
+// 校验DNS应答：长度合规、事务ID匹配、QR位=1
+fn is_valid_dns_reply(buf: &[u8], txid: u16) -> bool {
+    buf.len() >= 12 && buf[0..2] == txid.to_be_bytes() && buf[2] & 0x80 != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_dns_query, is_valid_dns_reply};
+
+    #[test]
+    fn dns_query_packet_shape() {
+        let pkt = build_dns_query(0xABCD, "www.example.com");
+        assert_eq!(&pkt[0..2], &[0xAB, 0xCD], "事务ID大端在前");
+        assert_eq!(&pkt[2..4], &[0x01, 0x00], "标准查询RD=1");
+        assert_eq!(&pkt[4..6], &[0, 1], "问题数=1");
+        // QNAME：3www 7example 3com 0
+        assert_eq!(
+            &pkt[12..pkt.len() - 4],
+            &[3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0]
+        );
+        assert_eq!(&pkt[pkt.len() - 4..], &[0, 1, 0, 1], "QTYPE=A QCLASS=IN");
+    }
+
+    #[test]
+    fn dns_query_single_label_name() {
+        let pkt = build_dns_query(1, "localhost");
+        // QNAME = 长度字节(1) + localhost(9) + 根结束(1) = 11字节，总长12+11+4=27
+        assert_eq!(pkt.len(), 27);
+    }
+
+    #[test]
+    fn dns_reply_validation() {
+        let mut reply = vec![0xAB, 0xCD, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]; // QR=1
+        assert!(is_valid_dns_reply(&reply, 0xABCD));
+        reply[0] = 0x00; // 事务ID不匹配
+        assert!(!is_valid_dns_reply(&reply, 0xABCD));
+        reply[0] = 0xAB;
+        reply[2] = 0x01; // QR=0：是查询不是应答
+        assert!(!is_valid_dns_reply(&reply, 0xABCD));
+        assert!(!is_valid_dns_reply(&reply[..8], 0xABCD), "过短报文拒绝");
     }
 }

@@ -222,7 +222,7 @@ fn is_target_available(check_result: &CheckResult) -> bool {
         CheckResultDetail::Tcp(r) => r.connected,
         CheckResultDetail::Udp(r) => r.response_received,
         CheckResultDetail::Dns(r) => r.resolved,
-        CheckResultDetail::Ftp(r) => r.connected,
+        CheckResultDetail::Ftp(r) => r.available(),
         CheckResultDetail::Traceroute(r) => r.success,
         CheckResultDetail::Cpu(_)
         | CheckResultDetail::Memory(_)
@@ -293,9 +293,21 @@ fn detail_summary(details: &CheckResultDetail) -> String {
         },
         CheckResultDetail::Icmp(r) => format!("存活 {}，耗时 {} ms", r.is_alive, r.elapsed_ms),
         CheckResultDetail::Tcp(r) => format!("连接 {}，耗时 {} ms", r.connected, r.elapsed_ms),
-        CheckResultDetail::Udp(r) => format!("响应 {}，耗时 {} ms", r.response_received, r.elapsed_ms),
+        CheckResultDetail::Udp(r) => format!(
+            "响应 {}（{}），耗时 {} ms",
+            r.response_received,
+            if r.dns_mode { "DNS语义" } else { "通用回包" },
+            r.elapsed_ms
+        ),
         CheckResultDetail::Dns(r) => format!("解析 {}，耗时 {} ms", r.resolved, r.elapsed_ms),
-        CheckResultDetail::Ftp(r) => format!("连接 {}，耗时 {} ms", r.connected, r.elapsed_ms),
+        CheckResultDetail::Ftp(r) => format!(
+            "连接 {}，握手 {}，匿名登录 {}（最后响应 {}），耗时 {} ms",
+            r.connected,
+            r.handshake_ok,
+            r.logged_in,
+            r.last_code.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
+            r.elapsed_ms
+        ),
         CheckResultDetail::Traceroute(r) => format!("成功 {}，{} 跳", r.success, r.hops.len()),
         CheckResultDetail::Cpu(r) => format!("使用率 {:.1}%", r.usage_percent),
         CheckResultDetail::Memory(r) => format!("使用率 {:.1}%", r.usage_percent),
