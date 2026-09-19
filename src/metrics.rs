@@ -108,6 +108,15 @@ impl MetricsRegistry {
         entry.0.duration.observe_ms(response_time_ms);
     }
 
+    // 移除某个监控的指标状态：删除监控配置时调用，防止 HashMap 保留已删配置的陈旧 entry。
+    // 删除是 id 唯一永久消失的路径（启停不清理，需保留历史计数），故按 id 精确移除即可
+    pub fn remove(&self, monitor_id: i32) {
+        self.inner
+            .lock()
+            .expect("metrics锁中毒")
+            .remove(&monitor_id);
+    }
+
     // 渲染 Prometheus 文本格式（exposition version 0.0.4）
     // alerting：alert_state表的当前抑制状态快照；None时省略 monitor_alerting 家族
     pub fn render(&self, alerting: Option<&[(i32, bool)]>) -> String {
@@ -305,6 +314,20 @@ mod tests {
     #[test]
     fn escape_label_handles_specials() {
         assert_eq!(escape_label("a\\b\"c\nd"), "a\\\\b\\\"c\\nd");
+    }
+
+    #[test]
+    fn remove_drops_stale_monitor_entry() {
+        let registry = MetricsRegistry::new();
+        registry.record(&route(Some(1), "a"), "HTTP", true, 10);
+        registry.record(&route(Some(2), "b"), "HTTP", true, 20);
+        // 删除 id=1：其样本行消失，id=2 不受影响
+        registry.remove(1);
+        let out = registry.render(None);
+        assert!(!out.contains("monitor_id=\"1\""), "已删监控不应再产生样本");
+        assert!(out.contains("monitor_id=\"2\""), "其余监控指标应保留");
+        // 移除不存在的 id 是无害的 no-op
+        registry.remove(999);
     }
 
     #[test]

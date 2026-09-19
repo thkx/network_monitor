@@ -2,4 +2,7 @@ pub mod auth_handlers;
 pub mod console_handlers;
 pub mod metrics_handlers;
 pub mod monitor_handlers;
+pub mod response;
 pub mod result_handlers;
+pub mod status_handlers;
+pub mod validation;

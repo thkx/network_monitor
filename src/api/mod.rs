@@ -6,6 +6,7 @@ use handles::console_handlers;
 use handles::metrics_handlers;
 use handles::monitor_handlers;
 use handles::result_handlers;
+use handles::status_handlers;
 
 // 统一注册Web路由：
 //   / 控制台、/login /logout 认证、/metrics 指标端点、/api/* 业务接口
@@ -45,7 +46,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
                 "/monitors/{id}/run",
                 web::post().to(monitor_handlers::run_monitor_once),
             )
-            .route("/status", web::get().to(monitor_handlers::get_console_status))
+            .route("/status", web::get().to(status_handlers::get_console_status))
             .route("/results", web::get().to(result_handlers::get_check_results)),
     );
 }

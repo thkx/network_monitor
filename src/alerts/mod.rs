@@ -4,6 +4,7 @@
 // 两者变化原因不同：告警语义改动不碰渠道代码，渠道增减不碰状态机
 mod engine;
 mod notify;
+mod rules;
 
 pub use engine::AlertsEngine;
 

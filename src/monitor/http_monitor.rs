@@ -90,10 +90,12 @@ impl HttpMonitor {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string()),
             res_content_length: content_length.unwrap_or(0),
+            // 字符集从 Content-Type 的 charset 参数解析（如 "text/html; charset=utf-8"）；
+            // 此前误取 Accept-Charset —— 那是请求头，响应里几乎不出现，字段恒为 None
             res_charset: headers
-                .get(reqwest::header::ACCEPT_CHARSET)
+                .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
+                .and_then(charset_from_content_type),
         }
     }
 
@@ -287,6 +289,17 @@ fn extract_json_path(json: &serde_json::Value, path: &str) -> Option<String> {
         other => Some(other.to_string()),
     }
 }
+// 从 Content-Type 头解析 charset 参数：如 "text/html; charset=utf-8" → Some("utf-8")
+// 参数名大小写不敏感，值两侧的引号与空白一并去除；无 charset 参数返回 None
+fn charset_from_content_type(content_type: &str) -> Option<String> {
+    content_type
+        .split(';')
+        .filter_map(|part| part.split_once('='))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("charset"))
+        .map(|(_, value)| value.trim().trim_matches('"').to_string())
+        .filter(|v| !v.is_empty())
+}
+
 //  下面的话 就是要实现具体的check方法了
 #[async_trait::async_trait]
 impl Monitor for HttpMonitor {
@@ -418,7 +431,7 @@ impl Monitor for HttpMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_json_path, HttpMonitor};
+    use super::{charset_from_content_type, extract_json_path, HttpMonitor};
     use crate::monitor::Monitor;
     use crate::monitor::types::{
         CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
@@ -551,25 +564,75 @@ mod tests {
         assert!(!r.advanced_available.business_metrics.contains_key("missing.path"));
     }
 
-    // 连接被拒：任务执行成功但目标不可达，错误分类为connect并携带原因
+    // 连接失败：任务执行成功但目标不可达，错误被分类并携带原因
     #[tokio::test]
     async fn connection_refused_marks_unreachable() {
-        // 127.0.0.1:9（discard）无监听必然拒绝；不用"绑定后释放"取端口——
-        // 并行测试里其他假服务器可能恰好复用该端口造成偶发
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
-        let (status, detail) = HttpMonitor::new().check(&http_config(addr, vec![], vec![])).await;
+        // 目标用 RFC 5737 TEST-NET-1（192.0.2.0/24，保留为文档用途、全球不可路由）：
+        // 连接必然失败（超时或网络不可达），且不依赖任何本机端口——
+        // 旧写法硬编码端口9 / 释放临时端口都受环境或并行测试端口复用影响而偶发失败。
+        // 短超时（1.5s）保证连接类失败快速返回，不拖慢测试
+        let config = MonitorConfig {
+            target: Some("http://192.0.2.1".to_string()),
+            interval: Some(60),
+            monitor_type: MonitorType::Http,
+            timeout: 1500,
+            details: MonitorConfigDetail::Http(HttpMonitorConfig {
+                url: "http://192.0.2.1".to_string(),
+                method: HttpMethodTypes::Get,
+                timeout: 1500,
+                headers: None,
+                body: None,
+                rules: None,
+                business_metric_fields: vec![],
+            }),
+        };
+        let (status, detail) = HttpMonitor::new().check(&config).await;
         assert!(status, "任务本身执行成功，不可达体现在结果里");
         let CheckResultDetail::Http(r) = detail else {
             panic!("应为HTTP结果");
         };
-        assert!(!r.basic_available.is_reachable);
-        // 端口9的失败方式随环境而异：真拒绝为connect，被防火墙DROP则表现为timeout
+        assert!(!r.basic_available.is_reachable, "不可路由地址应判为不可达");
+        // 失败方式随环境而异：连接被拒为connect，无路由/被丢弃则表现为timeout。
+        // 关键断言是"失败被分类并携带原因"，不假设具体的失败类别
         assert!(
-            matches!(r.error_kind.as_deref(), Some("connect" | "timeout")),
-            "错误类别应为connect或timeout: {:?}",
+            r.error_kind.is_some(),
+            "失败结果应携带错误类别: {:?}",
             r.error_kind
         );
-        assert!(r.error_message.is_some());
+        assert!(r.error_message.is_some(), "失败结果应携带错误原因");
+    }
+
+    // charset 从 Content-Type 参数解析：大小写不敏感、去引号与空白、无参数返回 None
+    #[test]
+    fn charset_parsed_from_content_type_param() {
+        assert_eq!(
+            charset_from_content_type("text/html; charset=utf-8").as_deref(),
+            Some("utf-8")
+        );
+        // 参数名大小写不敏感 + 值带引号与空白
+        assert_eq!(
+            charset_from_content_type("text/html; CharSet=\"GBK\" ").as_deref(),
+            Some("GBK")
+        );
+        // 无 charset 参数
+        assert_eq!(charset_from_content_type("application/json"), None);
+        // 有分号但无 charset
+        assert_eq!(charset_from_content_type("text/plain; boundary=x"), None);
+        // charset= 后为空
+        assert_eq!(charset_from_content_type("text/plain; charset="), None);
+    }
+
+    // 端到端：响应带 charset 的 Content-Type，结果的 res_charset 应被正确填充
+    #[tokio::test]
+    async fn res_charset_extracted_from_response_content_type() {
+        let addr = spawn_fake_http(canned_200("text/html; charset=utf-8", "<html/>"));
+        let (_, detail) = HttpMonitor::new()
+            .check(&http_config(addr, vec![], vec![]))
+            .await;
+        let CheckResultDetail::Http(r) = detail else {
+            panic!("应为HTTP结果");
+        };
+        assert_eq!(r.basic_available.res_charset.as_deref(), Some("utf-8"));
     }
 
     // 点路径提取：嵌套对象、数组下标、标量字符串化、缺失路径

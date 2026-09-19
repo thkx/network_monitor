@@ -1,7 +1,7 @@
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 
-use super::monitor_handlers::{DefaultResponseObj, PageData};
+use super::response::{clamp_pagination, DefaultResponseObj, PageData};
 use crate::database::services::result_service::ResultService;
 
 #[derive(Debug, Deserialize)]
@@ -16,7 +16,7 @@ pub async fn get_check_results(
     result_service: web::Data<ResultService>,
     query: web::Query<ResultQueryParams>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let (no, size) = super::monitor_handlers::clamp_pagination(query.page_no, query.page_size);
+    let (no, size) = clamp_pagination(query.page_no, query.page_size);
     let (list, total) = result_service
         .get_check_results(query.monitor_id, no, size)
         .map_err(|e| {
