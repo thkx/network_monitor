@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **12 种监控类型**：HTTP、ICMP(ping)、TCP、UDP（53端口按DNS协议语义探测并校验应答，其余端口仅检测任意回包）、DNS、FTP（匿名登录握手，验证协议可用而非仅端口开放）、TRACEROUTE(tracert)、CPU、MEMORY、DISK、PROCESS
+- **12 种监控类型**：HTTP、ICMP(ping)、TCP、UDP（53端口按DNS协议语义探测并校验应答，其余端口仅检测任意回包，且校验回包源地址与目标一致，排除局域网无关流量污染）、DNS、FTP（匿名登录握手，验证协议可用而非仅端口开放）、TRACEROUTE(tracert)、CPU、MEMORY、DISK、PROCESS
 - **三种运行模式**：
   - `once` — 对 monitor_list.json 中的配置各执行一次探测
   - `monitor --interval N` — 按 N 秒间隔持续探测（无持久化）
@@ -48,7 +48,8 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | PUT    | `/api/monitors/{id}`                                | 更新监控（enabled 不变）                    |
 | DELETE | `/api/monitors/{id}`                                | 删除监控（结果记录级联删除）                |
 | PATCH  | `/api/monitors/{id}/enabled`                        | 启用/禁用，body: `{"enabled": true}`        |
-| GET    | `/api/results?monitor_id=1&page_no=1&page_size=50`  | 分页查询监控结果                            |
+| GET    | `/api/results?monitor_id=1&page_no=1&page_size=50`  | 分页查询监控结果（OFFSET 分页，返回 total） |
+| GET    | `/api/results?monitor_id=1&cursor=true&page_size=50`（翻页带 `&before_id=<上页末条id>`） | 游标（keyset）分页，深翻页不退化，返回 `next_cursor` |
 
 ## 告警配置示例
 
@@ -82,6 +83,8 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - **EMAIL 渠道**：在 `notify_config.email` 配置 SMTP 即可，如
   `"email": {"smtp_host":"smtp.example.com","smtp_port":465,"username":"monitor@example.com","password":"授权码","to":["ops@example.com"]}`
   （465=隐式TLS，587=STARTTLS，其他端口=明文仅建议本地 relay；password 为空则跳过认证）
+- **明文 SMTP 凭证保护**：非 465/587 的明文端口下，若目标主机非本机（loopback）且配置了 password，直接拒绝发送——避免授权码明文过网被窃听；本机 relay（localhost/127.0.0.1/::1）仍放行
+- **未知通知渠道拒绝**：`notify_type` 无法识别（非 FEISHU/DINGTALK/WECOM/EMAIL）时配置期返回 400，不接受一个永远发不出去的配置
 - **SMS 未实现**：配置期直接返回 400 拒绝，不做静默占位
 - **防抖**：`consecutive_failures` 连续 N 次命中才发告警、`consecutive_successes` 连续 M 次正常才发恢复通知（缺省均为 1；可根治网络抖动误报）
 - **失败重试**：通知发送失败后自动后台退避重试（1s/5s/30s/2m/5m 共 5 次），不阻塞监控任务循环；重试成功与最终放弃均有明确日志
@@ -240,7 +243,7 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 | `GET/PUT/DELETE /api/monitors/{id}` | 查询 / 更新 / 删除监控配置            |
 | `PATCH /api/monitors/{id}/enabled` | 启停监控（触发调度器热更新）           |
 | `POST /api/monitors/{id}/run`  | 手动执行一次检查并持久化结果               |
-| `GET /api/results`             | 检查结果分页查询（`monitor_id` 可选过滤）  |
+| `GET /api/results`             | 检查结果查询（`monitor_id` 可选过滤；OFFSET 分页，或 `cursor=true`/`before_id` 走游标分页）  |
 
 ## 存储与写入策略
 
@@ -248,6 +251,7 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 - **详情随行**：`metadata_json` 内含 `check_id` 与该次检查的完整结果详情 JSON，历史结果可直接通过 `/api/results` 回查（旧记录仅有 check_id）
 - **WAL 模式**：读写不互斥，配合 busy_timeout 5s 与 foreign_keys 级联删除
 - **保留策略**：每 24 小时清理 `RESULT_RETENTION_DAYS` 天前的过期结果
+- **游标分页**：`/api/results` 支持 keyset 分页（`cursor=true`，翻页带 `before_id=<上页末条id>`），按 `id < before_id` 直接命中主键索引，翻页代价与页码无关；OFFSET 分页在保留期内百万行结果上深翻页会退化为近全表扫描，大数据量翻页应改用游标模式
 - **优雅关停**：Ctrl+C / SIGTERM 后停止接受请求、停掉全部监控任务并完成最终攒批落库（同步 DB 调用均在阻塞线程池执行，不卡 runtime）
 
 ## Docker 部署
