@@ -65,6 +65,18 @@ impl ResultService {
         self.repo.get_check_results(monitor_id, page, page_size)
     }
 
+    // 游标（keyset）分页查询：翻页代价与页码无关，适合深翻页与大表。
+    // before_id 为 None 取第一页（最新），否则取该 id 之前的一页
+    pub fn get_check_results_keyset(
+        &self,
+        monitor_id: Option<i32>,
+        before_id: Option<i32>,
+        limit: i64,
+    ) -> Result<Vec<CheckResultModel>, Error> {
+        self.repo
+            .get_check_results_keyset(monitor_id, before_id, limit)
+    }
+
     // 每个监控的最新一条结果（/api/status聚合视图用；monitor_ids由调用方传入，
     // 逐监控索引化查询避免全表扫描——见repo注释）
     pub fn get_latest_by_monitor(

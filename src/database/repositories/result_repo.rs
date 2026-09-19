@@ -101,6 +101,33 @@ impl CheckResultRepository {
             .load::<CheckResultModel>(&mut conn)?;
         Ok((results, total))
     }
+
+    // 游标（keyset）分页：按 id 降序取 before_id 之前的一页。
+    // 与 OFFSET 分页的区别——OFFSET 需扫描并丢弃前 N 行，翻到深页（page_no 很大）时
+    // 在百万行的 check_result 上会退化为近全表扫描；keyset 用 `id < before_id` 直接命中
+    // 主键索引定位，翻页代价与页码无关（O(log n + page_size)）。
+    // before_id 为 None 表示取第一页（最新）；返回结果按 id 降序，调用方用最后一条的 id 作为
+    // 下一页的游标。不返回 total（keyset 语义下总数与翻页解耦，需要时另查 count）
+    pub fn get_check_results_keyset(
+        &self,
+        monitor_id: Option<i32>,
+        before_id: Option<i32>,
+        limit: i64,
+    ) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
+        let mut conn = get_connection(&self.pool);
+        let lim = limit.clamp(1, 500);
+        let mut query = check_result::table.into_boxed();
+        if let Some(mid) = monitor_id {
+            query = query.filter(check_result::monitor_id.eq(mid));
+        }
+        if let Some(cursor) = before_id {
+            query = query.filter(check_result::id.lt(cursor));
+        }
+        query
+            .order(check_result::id.desc())
+            .limit(lim)
+            .load::<CheckResultModel>(&mut conn)
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +189,77 @@ mod tests {
         assert_eq!(list[2].response_time, 10);
         // 空批次为no-op
         assert_eq!(repo.insert_check_results_batch(&[]).unwrap(), 0);
+    }
+
+    // keyset游标分页：按id降序、游标之前取页，跨页无重叠无遗漏、按monitor_id隔离
+    #[test]
+    fn keyset_pagination_walks_pages_without_overlap() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_id = create_test_monitor(&pool, "t-keyset");
+        let other_id = create_test_monitor(&pool, "t-keyset-other");
+        let repo = CheckResultRepository::new(pool);
+        // 目标监控插5条，另一监控插2条（验证过滤隔离）
+        for i in 1..=5 {
+            repo.insert_check_result(&CheckResultModelInsert {
+                monitor_id,
+                monitor_type: "HTTP".to_string(),
+                status: 1,
+                response_time: i * 10,
+                metadata_json: None,
+            })
+            .unwrap();
+        }
+        for _ in 0..2 {
+            repo.insert_check_result(&CheckResultModelInsert {
+                monitor_id: other_id,
+                monitor_type: "HTTP".to_string(),
+                status: 1,
+                response_time: 999,
+                metadata_json: None,
+            })
+            .unwrap();
+        }
+
+        // 第一页（before_id=None）：取最新2条，id降序
+        let page1 = repo
+            .get_check_results_keyset(Some(monitor_id), None, 2)
+            .unwrap();
+        assert_eq!(page1.len(), 2);
+        assert!(page1[0].id > page1[1].id, "应按id降序");
+        assert_eq!(page1[0].response_time, 50, "最新一条在前");
+
+        // 第二页：游标=第一页末条id，取其之前2条，与第一页无重叠
+        let cursor = page1.last().unwrap().id;
+        let page2 = repo
+            .get_check_results_keyset(Some(monitor_id), Some(cursor), 2)
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert!(page2[0].id < cursor, "第二页应严格在游标之前");
+        assert!(
+            page2.iter().all(|r| r.id < page1[1].id),
+            "跨页无重叠"
+        );
+
+        // 第三页：剩1条
+        let cursor2 = page2.last().unwrap().id;
+        let page3 = repo
+            .get_check_results_keyset(Some(monitor_id), Some(cursor2), 2)
+            .unwrap();
+        assert_eq!(page3.len(), 1, "第五条落在最后一页");
+        assert_eq!(page3[0].response_time, 10, "最旧一条");
+
+        // 走到底：游标过末条后返回空
+        let cursor3 = page3.last().unwrap().id;
+        let page4 = repo
+            .get_check_results_keyset(Some(monitor_id), Some(cursor3), 2)
+            .unwrap();
+        assert!(page4.is_empty(), "走到底应返回空页");
+
+        // monitor_id过滤隔离：目标监控总计5条，另一监控的记录不混入
+        let all_target = repo
+            .get_check_results_keyset(Some(monitor_id), None, 500)
+            .unwrap();
+        assert_eq!(all_target.len(), 5, "只返回目标监控的记录");
     }
 }

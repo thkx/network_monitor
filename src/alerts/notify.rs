@@ -2,7 +2,7 @@
 // 支持渠道：FEISHU（可选secret签名）、DINGTALK（可选secret自动加签）、WECOM、EMAIL（SMTP）
 // 发送失败自动转入后台退避重试（见 retry_with_backoff / RETRY_DELAYS_SECS）
 
-use crate::tools_types::NotifyConfig;
+use crate::tools_types::{NotifyConfig, NotifyType};
 use reqwest::Client;
 use std::time::Duration;
 
@@ -20,10 +20,14 @@ impl NotifyEngine {
         }
     }
 
-    // 根据通知方式发送告警消息（类型不区分大小写）
+    // 根据通知方式发送告警消息（类型经NotifyType解析，大小写不敏感）
     pub async fn send_alert_message(&self, message: String) {
-        match self.notify_type.to_uppercase().as_str() {
-            "EMAIL" => {
+        let Some(notify_type) = NotifyType::parse(&self.notify_type) else {
+            tracing::warn!("未知的告警通知类型: {}", self.notify_type);
+            return;
+        };
+        match notify_type {
+            NotifyType::Email => {
                 // SMTP邮件：构建传输器后整个会话后台化——SMTP多次往返可能远超5秒，
                 // 不能阻塞监控任务循环；重试/成功/失败日志与webhook渠道同一口径
                 let Some(email_cfg) = &self.notify_config.email else {
@@ -64,12 +68,12 @@ impl NotifyEngine {
                     }
                 });
             }
-            "SMS" => {
+            NotifyType::Sms => {
                 // 未实现的渠道显式报错而非假装成功：配置校验层已拒绝SMS，
                 // 此日志只在配置绕过校验直写数据库时出现
                 tracing::error!("SMS告警渠道未实现，通知未发送: {}", message);
             }
-            "FEISHU" => {
+            NotifyType::Feishu => {
                 // 飞书自定义机器人：msg_type/content结构 + 可选签名
                 let mut body = serde_json::json!({
                     "msg_type": "text",
@@ -89,21 +93,18 @@ impl NotifyEngine {
                 )
                 .await;
             }
-            "DINGTALK" | "WECOM" => {
+            NotifyType::Dingtalk | NotifyType::Wecom => {
                 // 钉钉/企业微信机器人：JSON结构相同 {"msgtype":"text","text":{"content":...}}
                 let body = serde_json::json!({
                     "msgtype": "text",
                     "text": { "content": message }
                 });
-                let channel = if self.notify_type.to_uppercase() == "DINGTALK" {
-                    "钉钉"
-                } else {
-                    "企业微信"
-                };
+                let is_dingtalk = notify_type == NotifyType::Dingtalk;
+                let channel = if is_dingtalk { "钉钉" } else { "企业微信" };
                 // 钉钉"加签"安全设置：sign = base64(HMAC-SHA256(key=secret, "{毫秒时间戳}\n{secret}"))，
                 // URL编码后与timestamp一起拼接到webhook_url（URL已含timestamp参数则尊重手拼结果）
                 let mut url = self.notify_config.webhook_url.clone();
-                if self.notify_type.to_uppercase() == "DINGTALK"
+                if is_dingtalk
                     && let Some(secret) = &self.notify_config.secret
                     && !url.contains("timestamp=")
                 {
@@ -116,9 +117,6 @@ impl NotifyEngine {
                     url = format!("{url}{sep}timestamp={ts}&{encoded}");
                 }
                 self.post_webhook(url.as_str(), body, &message, channel).await;
-            }
-            _ => {
-                tracing::warn!("未知的告警通知类型: {}", self.notify_type);
             }
         }
     }

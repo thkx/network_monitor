@@ -328,6 +328,49 @@ pub struct AlertSingleRule {
     pub condition: NotifyCondition, // 触发条件
 }
 
+/// 通知渠道类型：字符串 notify_type 的唯一事实来源。
+/// 保持配置里 notify_type 为字符串（大小写不敏感、兼容库中既有 config_json），
+/// 但发送分发与配置校验都经由本枚举解析，消除散落的字符串字面量匹配与拼写漂移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyType {
+    Feishu,
+    Dingtalk,
+    Wecom,
+    Email,
+    Sms,
+}
+
+impl NotifyType {
+    /// 大小写不敏感解析；无法识别的渠道返回 None（发送层告警、校验层拒绝）
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_uppercase().as_str() {
+            "FEISHU" => Some(NotifyType::Feishu),
+            "DINGTALK" => Some(NotifyType::Dingtalk),
+            "WECOM" => Some(NotifyType::Wecom),
+            "EMAIL" => Some(NotifyType::Email),
+            "SMS" => Some(NotifyType::Sms),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod notify_type_tests {
+    use super::NotifyType;
+
+    #[test]
+    fn parse_is_case_insensitive_and_trims() {
+        assert_eq!(NotifyType::parse("FEISHU"), Some(NotifyType::Feishu));
+        assert_eq!(NotifyType::parse("feishu"), Some(NotifyType::Feishu));
+        assert_eq!(NotifyType::parse("  DingTalk  "), Some(NotifyType::Dingtalk));
+        assert_eq!(NotifyType::parse("wecom"), Some(NotifyType::Wecom));
+        assert_eq!(NotifyType::parse("Email"), Some(NotifyType::Email));
+        assert_eq!(NotifyType::parse("SMS"), Some(NotifyType::Sms));
+        assert_eq!(NotifyType::parse("telegram"), None);
+        assert_eq!(NotifyType::parse(""), None);
+    }
+}
+
 /// 告警规则类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AlertRuleTypes {

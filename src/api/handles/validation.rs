@@ -2,7 +2,9 @@
 // （从 monitor_handlers 抽出：校验规则独立演进，与 handler 编排逻辑解耦）
 use regex::Regex;
 
-use crate::tools_types::{AlertRuleTypes, ContentVerificationRules, SelfDefineMonitorConfig};
+use crate::tools_types::{
+    AlertRuleTypes, ContentVerificationRules, NotifyType, SelfDefineMonitorConfig,
+};
 
 // 创建/更新前的配置校验：非法配置返回400，避免脏配置入库
 pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Error> {
@@ -41,9 +43,16 @@ pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web:
     // 告警配置校验：防抖参数范围 + 通知渠道专项 + THRESHOLD规则的阈值条件
     if let Some(cfg) = entry.alert_rules.as_ref() {
         // 渠道专项校验：EMAIL必须带SMTP配置且收件人非空；SMS未实现，显式拒绝；
-        // webhook渠道URL必填——避免"接受了配置却永远发送失败重试"的无效配置
-        match cfg.notify_type.to_uppercase().as_str() {
-            "EMAIL" => {
+        // webhook渠道URL必填——避免"接受了配置却永远发送失败重试"的无效配置。
+        // 未知渠道直接拒绝：接受一个发不出去的渠道等于埋雷（此前 _ 分支静默放行）
+        let Some(notify_type) = NotifyType::parse(&cfg.notify_type) else {
+            return Err(actix_web::error::ErrorBadRequest(format!(
+                "未知的通知渠道 {:?}，支持 FEISHU / DINGTALK / WECOM / EMAIL",
+                cfg.notify_type
+            )));
+        };
+        match notify_type {
+            NotifyType::Email => {
                 let Some(email) = cfg.notify_config.email.as_ref() else {
                     return Err(actix_web::error::ErrorBadRequest(
                         "EMAIL 通知必须配置 notify_config.email（smtp_host/username/password/to）",
@@ -55,19 +64,18 @@ pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web:
                     ));
                 }
             }
-            "SMS" => {
+            NotifyType::Sms => {
                 return Err(actix_web::error::ErrorBadRequest(
                     "SMS 通知暂未实现，请使用 FEISHU / DINGTALK / WECOM / EMAIL",
                 ));
             }
-            "FEISHU" | "DINGTALK" | "WECOM"
-                if cfg.notify_config.webhook_url.trim().is_empty() =>
-            {
-                return Err(actix_web::error::ErrorBadRequest(
-                    "webhook 渠道必须配置 notify_config.webhook_url",
-                ));
+            NotifyType::Feishu | NotifyType::Dingtalk | NotifyType::Wecom => {
+                if cfg.notify_config.webhook_url.trim().is_empty() {
+                    return Err(actix_web::error::ErrorBadRequest(
+                        "webhook 渠道必须配置 notify_config.webhook_url",
+                    ));
+                }
             }
-            _ => {}
         }
         for (label, n) in [
             ("consecutive_failures", cfg.consecutive_failures),
@@ -201,5 +209,32 @@ mod tests {
             r#"{"target":"x","monitor_type":"CPU","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[{"rule_type":"THRESHOLD","condition":{"threshold":{"metric":"cpu","op":">=","value":80}}}]}}"#,
         );
         assert!(validate_config(&good).is_ok());
+    }
+
+    #[test]
+    fn unknown_notify_type_is_rejected() {
+        // 未知渠道此前走 _ 分支静默放行，接受一个发不出去的配置；现在应拒绝
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"telegram","notify_config":{"webhook_url":"http://x"},"rules":[]}}"#,
+        );
+        assert!(validate_config(&entry).is_err());
+    }
+
+    #[test]
+    fn notify_type_is_case_insensitive() {
+        // 小写 notify_type 应被 NotifyType::parse 正常识别（大小写不敏感）
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"feishu","notify_config":{"webhook_url":"http://x"},"rules":[]}}"#,
+        );
+        assert!(validate_config(&entry).is_ok());
+    }
+
+    #[test]
+    fn webhook_channel_requires_url() {
+        // WECOM 等 webhook 渠道 URL 为空应拒绝
+        let entry = entry_from_json(
+            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"WECOM","notify_config":{"webhook_url":"  "},"rules":[]}}"#,
+        );
+        assert!(validate_config(&entry).is_err());
     }
 }
