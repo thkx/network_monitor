@@ -13,6 +13,16 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 
+// 目标主机是否为loopback（本机）：明文认证到本机relay是安全的，凭证不出网卡。
+// 直接IP按IpAddr::is_loopback判定；主机名仅识别常见的localhost字面量
+// （不做DNS解析——解析结果可被投毒，且这里只需覆盖本地relay的实际写法）
+fn is_loopback_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    host.eq_ignore_ascii_case("localhost")
+}
+
 // 发送一封UTF-8文本邮件。返回Err时附带失败环节上下文，供通知重试日志直接定位
 pub async fn send_mail(cfg: &EmailNotifyConfig, subject: &str, body: &str) -> Result<(), String> {
     if cfg.to.is_empty() {
@@ -47,7 +57,16 @@ pub async fn send_mail(cfg: &EmailNotifyConfig, subject: &str, body: &str) -> Re
         587 => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
             .map_err(|e| format!("创建STARTTLS传输器失败: {e}"))?,
         p => {
-            tracing::warn!("SMTP端口 {p} 使用明文连接（凭证可能被窃听），建议465/587");
+            // 明文连接下发送凭证=授权码明文过网，被窃听即泄露。
+            // 但loopback（localhost/127.0.0.1/::1）流量不出本机，明文认证到本地relay是安全且常见的用法；
+            // 仅当明文发往非loopback主机且带凭证时才拒绝——避免授权码在真实网络上裸奔
+            if !cfg.password.is_empty() && !is_loopback_host(host) {
+                return Err(format!(
+                    "SMTP端口 {p} 为明文连接且目标 {host} 非本机，禁止发送凭证（授权码会明文过网）；\
+                     请改用 465(隐式TLS)/587(STARTTLS)，或清空 password 走免认证relay"
+                ));
+            }
+            tracing::warn!("SMTP端口 {p} 使用明文连接（建议465/587）");
             AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
         }
     }
@@ -184,5 +203,41 @@ mod tests {
         cfg.to = vec![];
         let err = send_mail(&cfg, "t", "b").await.expect_err("空收件人应报错");
         assert!(err.contains("收件人"), "错误应指明收件人缺失: {err}");
+    }
+
+    // 明文端口 + 非本机目标 + 非空密码：拒绝发送，避免授权码明文过网
+    #[tokio::test]
+    async fn send_mail_rejects_plaintext_credentials_to_remote() {
+        let cfg = EmailNotifyConfig {
+            smtp_host: "smtp.example.com".to_string(), // 非loopback
+            smtp_port: 2525,                           // 明文端口
+            username: "monitor@example.com".to_string(),
+            password: "auth-code".to_string(), // 非空凭证
+            from: None,
+            to: vec!["ops@example.com".to_string()],
+        };
+        let err = send_mail(&cfg, "t", "b").await.expect_err("明文发凭证到远端应拒绝");
+        assert!(err.contains("明文"), "错误应指明明文风险: {err}");
+    }
+
+    // 明文端口 + 本机目标（loopback）+ 非空密码：放行（本地relay常见用法，凭证不出网卡）
+    #[tokio::test]
+    async fn send_mail_allows_plaintext_credentials_to_loopback() {
+        // 假SMTP绑定在127.0.0.1，端口非465/587即明文；带密码也应走通
+        let (addr, transcript) = spawn_fake_smtp();
+        let cfg = email_cfg(addr.port()); // smtp_host=127.0.0.1, password非空
+        send_mail(&cfg, "t", "b").await.expect("本机明文relay应放行");
+        let t = transcript.lock().unwrap().join("\n");
+        assert!(t.contains("AUTH"), "本机relay带密码应认证: {t}");
+    }
+
+    #[test]
+    fn loopback_host_detection() {
+        assert!(super::is_loopback_host("127.0.0.1"));
+        assert!(super::is_loopback_host("::1"));
+        assert!(super::is_loopback_host("localhost"));
+        assert!(super::is_loopback_host("LocalHost"));
+        assert!(!super::is_loopback_host("smtp.example.com"));
+        assert!(!super::is_loopback_host("10.0.0.1"));
     }
 }
