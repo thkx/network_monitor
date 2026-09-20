@@ -343,11 +343,10 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn failed_task_counts_as_unavailable() {
-        let engine = engine_with_rules(vec![availability_rule()]);
-        assert!(engine.evaluate(&http_result(false, true, Some(200))).is_some());
-    }
+    // 注：任务失败(status=false)判为不可用、ICMP 不可达判为不可用，这两条纯规则
+    // 分支已由 rules.rs 的 failed_task_is_unavailable / availability_applies_to_icmp
+    // 真值表覆盖；此处只需 availability_rule_triggers_on_unreachable 证明一次
+    // "有 Availability 规则且不可用⇒evaluate 返回 Some" 的接线即可
 
     #[test]
     fn no_rules_never_triggers() {
@@ -387,23 +386,6 @@ mod tests {
             }),
         };
         assert!(engine.evaluate(&result).is_none());
-    }
-
-    #[test]
-    fn availability_rule_applies_to_icmp() {
-        let engine = engine_with_rules(vec![availability_rule()]);
-        let down = CheckResult {
-            id: 3,
-            monitor_type: MonitorType::Icmp,
-            target: Some("10.0.0.1".to_string()),
-            status: true,
-            details: CheckResultDetail::Icmp(IcmpMonitorResult {
-                is_alive: false,
-                elapsed_ms: 30,
-                rtt_ms: None,
-            }),
-        };
-        assert!(engine.evaluate(&down).is_some());
     }
 
     #[test]
