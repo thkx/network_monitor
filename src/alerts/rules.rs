@@ -216,11 +216,18 @@ pub(super) fn failure_reason(r: &HttpMonitorResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{detail_summary, failure_reason, is_target_available};
-    use crate::monitor::types::{
-        CheckResult, CheckResultDetail, IcmpMonitorResult,
+    use super::{
+        detail_summary, evaluate_content, evaluate_response_code, evaluate_threshold,
+        failure_reason, is_target_available,
     };
-    use crate::tools_types::{BasicAvailability, HttpMonitorResult, MonitorType};
+    use crate::monitor::types::{
+        CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
+    };
+    use crate::tools_types::{
+        BasicAvailability, ContentVerificationRules, ContentVerificationRulesResult,
+        ContentVerificationRulesSingle, HttpMonitorResult, MonitorType, NotifyCondition,
+        ThresholdCondition,
+    };
 
     // 构造HTTP类型的检查结果（其余字段走Default）
     fn http_result(status: bool, reachable: bool, code: Option<u16>) -> CheckResult {
@@ -237,6 +244,30 @@ mod tests {
                 },
                 ..Default::default()
             }),
+        }
+    }
+
+    // 非HTTP结果（ICMP），供验证response_code/content规则对非HTTP静默跳过
+    fn icmp_result() -> CheckResult {
+        CheckResult {
+            id: 2,
+            monitor_type: MonitorType::Icmp,
+            target: Some("10.0.0.1".to_string()),
+            status: true,
+            details: CheckResultDetail::Icmp(IcmpMonitorResult {
+                is_alive: true,
+                elapsed_ms: 5,
+                rtt_ms: None,
+            }),
+        }
+    }
+
+    fn cond(contains: Vec<u16>, no_contains: Vec<u16>, regex: &str) -> NotifyCondition {
+        NotifyCondition {
+            contains,
+            no_contains,
+            regex: regex.to_string(),
+            ..Default::default()
         }
     }
 
@@ -283,5 +314,199 @@ mod tests {
         );
         let failed = http_result(false, false, None);
         assert_eq!(detail_summary(&failed.details), "请求失败（未知原因）");
+    }
+
+    // ---- evaluate_response_code 直接单测（此前仅经 engine.evaluate 间接覆盖）----
+
+    #[test]
+    fn response_code_missing_code_triggers() {
+        // 请求失败拿不到响应码：直接告警
+        let msg = evaluate_response_code("t", &http_result(true, false, None), &cond(vec![], vec![], ""))
+            .expect("无响应码应告警");
+        assert!(msg.contains("未获取到响应码"));
+    }
+
+    #[test]
+    fn response_code_contains_list_hits() {
+        // contains 列表命中即告警；不在列表则静默
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(500)), &cond(vec![500, 502], vec![], ""))
+                .is_some()
+        );
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(200)), &cond(vec![500, 502], vec![], ""))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_code_no_contains_list_hits() {
+        // no_contains 允许列表：不在列表内即告警，在列表内静默
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(500)), &cond(vec![], vec![200, 301], ""))
+                .is_some()
+        );
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(200)), &cond(vec![], vec![200, 301], ""))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_code_regex_hits() {
+        // 正则命中响应码即告警；非法正则安全跳过（不 panic）
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(503)), &cond(vec![], vec![], r"5\d\d"))
+                .is_some()
+        );
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(200)), &cond(vec![], vec![], r"5\d\d"))
+                .is_none()
+        );
+        assert!(
+            evaluate_response_code("t", &http_result(true, true, Some(500)), &cond(vec![], vec![], "([bad"))
+                .is_none(),
+            "非法正则应安全跳过"
+        );
+    }
+
+    #[test]
+    fn response_code_skipped_for_non_http() {
+        // 非HTTP结果无响应码语义：直接跳过
+        assert!(evaluate_response_code("t", &icmp_result(), &cond(vec![], vec![200], "")).is_none());
+    }
+
+    // ---- evaluate_content 直接单测 ----
+
+    fn http_with_failed_content(n: usize) -> CheckResult {
+        let mut r = http_result(true, true, Some(200));
+        if let CheckResultDetail::Http(ref mut h) = r.details {
+            h.content_verification.failed_rules = (0..n)
+                .map(|i| ContentVerificationRulesResult {
+                    rules: ContentVerificationRulesSingle {
+                        rule_type: ContentVerificationRules::Contains,
+                        rule_content: format!("kw{i}"),
+                        rule_description: String::new(),
+                    },
+                    ..Default::default()
+                })
+                .collect();
+        }
+        r
+    }
+
+    #[test]
+    fn content_reports_failed_rules() {
+        let msg = evaluate_content("t", &http_with_failed_content(2)).expect("有失败项应告警");
+        assert!(msg.contains("内容校验失败 2 项"));
+        assert!(msg.contains("contains(kw0)") && msg.contains("contains(kw1)"));
+    }
+
+    #[test]
+    fn content_silent_when_no_failed_rules() {
+        // 无失败项（含未配置内容规则）：静默，不把"没配规则"当异常
+        assert!(evaluate_content("t", &http_with_failed_content(0)).is_none());
+    }
+
+    #[test]
+    fn content_skipped_for_non_http() {
+        assert!(evaluate_content("t", &icmp_result()).is_none());
+    }
+
+    // ---- evaluate_threshold 直接单测 ----
+
+    fn threshold(metric: &str, op: &str, value: f64) -> NotifyCondition {
+        NotifyCondition {
+            threshold: Some(ThresholdCondition {
+                metric: metric.to_string(),
+                op: op.to_string(),
+                value,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn cpu_result(usage: f32, status: bool) -> CheckResult {
+        CheckResult {
+            id: 5,
+            monitor_type: MonitorType::Cpu,
+            target: None,
+            status,
+            details: CheckResultDetail::Cpu(CpuMonitorResult {
+                usage_percent: usage,
+                core_count: 8,
+            }),
+        }
+    }
+
+    #[test]
+    fn threshold_all_comparison_ops() {
+        // 六种比较符各命中一次（含 == 的浮点相等）
+        for (op, val, cur, hit) in [
+            (">", 80.0, 90.0, true),
+            (">", 80.0, 70.0, false),
+            (">=", 90.0, 90.0, true),
+            ("<", 10.0, 5.0, true),
+            ("<=", 10.0, 10.0, true),
+            ("==", 50.0, 50.0, true),
+            ("=", 50.0, 40.0, false),
+        ] {
+            let got = evaluate_threshold(&cpu_result(cur, true), &threshold("cpu", op, val)).is_some();
+            assert_eq!(got, hit, "op={op} val={val} cur={cur}");
+        }
+    }
+
+    #[test]
+    fn threshold_missing_condition_is_none() {
+        // 未配置 threshold 条件：跳过（防御JSON直写库）
+        assert!(evaluate_threshold(&cpu_result(99.0, true), &NotifyCondition::default()).is_none());
+    }
+
+    #[test]
+    fn threshold_skipped_when_task_failed() {
+        // 任务失败时数值不可信：跳过（失败由 AVAILABILITY 规则覆盖）
+        assert!(evaluate_threshold(&cpu_result(99.0, false), &threshold("cpu", ">", 1.0)).is_none());
+    }
+
+    #[test]
+    fn threshold_metric_type_mismatch_is_none() {
+        // cpu 规则配在 Disk 结果上：类型不匹配跳过而非误判
+        let disk = CheckResult {
+            id: 7,
+            monitor_type: MonitorType::Disk,
+            target: None,
+            status: true,
+            details: CheckResultDetail::Disk(DiskMonitorResult {
+                total_bytes: 1000,
+                available_bytes: 100,
+                disks: vec![],
+            }),
+        };
+        assert!(evaluate_threshold(&disk, &threshold("cpu", ">", 1.0)).is_none());
+    }
+
+    #[test]
+    fn threshold_disk_usage_computed_and_zero_total_skipped() {
+        // 磁盘按使用率换算：available=100/total=1000 → 使用率90%，>=90 命中
+        let disk = |total: u64, avail: u64| CheckResult {
+            id: 7,
+            monitor_type: MonitorType::Disk,
+            target: None,
+            status: true,
+            details: CheckResultDetail::Disk(DiskMonitorResult {
+                total_bytes: total,
+                available_bytes: avail,
+                disks: vec![],
+            }),
+        };
+        assert!(evaluate_threshold(&disk(1000, 100), &threshold("disk", ">=", 90.0)).is_some());
+        // total=0 防除零：跳过
+        assert!(evaluate_threshold(&disk(0, 0), &threshold("disk", ">", 0.0)).is_none());
+    }
+
+    #[test]
+    fn threshold_illegal_op_is_none() {
+        // 非法比较符：安全跳过（API侧已校验，防御直写库）
+        assert!(evaluate_threshold(&cpu_result(99.0, true), &threshold("cpu", "~", 1.0)).is_none());
     }
 }

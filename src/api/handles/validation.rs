@@ -118,25 +118,19 @@ mod tests {
         serde_json::from_str(json).expect("测试JSON应可反序列化")
     }
 
+    // interval 边界（表驱动）：下限0拒绝、上限86401拒绝、边界值86400接受
     #[test]
-    fn zero_interval_is_rejected() {
-        let entry =
-            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","interval":0}"#);
-        assert!(validate_config(&entry).is_err());
-    }
-
-    #[test]
-    fn interval_over_one_day_is_rejected() {
-        let entry =
-            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","interval":86401}"#);
-        assert!(validate_config(&entry).is_err());
-    }
-
-    #[test]
-    fn boundary_interval_is_accepted() {
-        let entry =
-            entry_from_json(r#"{"target":"https://a.com","monitor_type":"HTTP","interval":86400}"#);
-        assert!(validate_config(&entry).is_ok());
+    fn interval_bounds() {
+        for (interval, expect_ok) in [(0u64, false), (86401, false), (86400, true)] {
+            let entry = entry_from_json(&format!(
+                r#"{{"target":"https://a.com","monitor_type":"HTTP","interval":{interval}}}"#
+            ));
+            assert_eq!(
+                validate_config(&entry).is_ok(),
+                expect_ok,
+                "interval={interval} 期望 ok={expect_ok}"
+            );
+        }
     }
 
     #[test]
@@ -165,28 +159,23 @@ mod tests {
         assert!(validate_config(&entry).is_ok());
     }
 
+    // 防抖参数边界（表驱动）：failures=0 拒绝、successes=1001 越上限拒绝、3/2 合法接受
     #[test]
-    fn debounce_zero_is_rejected() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[],"consecutive_failures":0}}"#,
-        );
-        assert!(validate_config(&entry).is_err());
-    }
-
-    #[test]
-    fn debounce_upper_bound_is_rejected() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[],"consecutive_successes":1001}}"#,
-        );
-        assert!(validate_config(&entry).is_err());
-    }
-
-    #[test]
-    fn debounce_valid_value_passes() {
-        let entry = entry_from_json(
-            r#"{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{"notify_type":"FEISHU","notify_config":{"webhook_url":"http://x"},"rules":[],"consecutive_failures":3,"consecutive_successes":2}}"#,
-        );
-        assert!(validate_config(&entry).is_ok());
+    fn debounce_bounds() {
+        for (fields, expect_ok) in [
+            (r#""consecutive_failures":0"#, false),
+            (r#""consecutive_successes":1001"#, false),
+            (r#""consecutive_failures":3,"consecutive_successes":2"#, true),
+        ] {
+            let entry = entry_from_json(&format!(
+                r#"{{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{{"notify_type":"FEISHU","notify_config":{{"webhook_url":"http://x"}},"rules":[],{fields}}}}}"#
+            ));
+            assert_eq!(
+                validate_config(&entry).is_ok(),
+                expect_ok,
+                "debounce 字段 [{fields}] 期望 ok={expect_ok}"
+            );
+        }
     }
 
     #[test]
