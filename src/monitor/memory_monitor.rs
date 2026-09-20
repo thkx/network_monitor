@@ -1,13 +1,21 @@
 use super::monitor_trait::Monitor;
 use super::types::{CheckResultDetail, MemoryMonitorResult, MonitorConfig};
 use crate::tools_types::MonitorType;
+use std::sync::Mutex;
 use sysinfo::System;
 
-pub struct MemoryMonitor {}
+pub struct MemoryMonitor {
+    // 跨轮次复用同一 System：refresh_memory 只更新内存字段，
+    // 无需每轮重建实例（重建会丢弃内部缓存、重新分配）。
+    // check 取 &self，用 Mutex 提供内部可变性；同一任务串行调用无锁竞争
+    sys: Mutex<System>,
+}
 
 impl MemoryMonitor {
     pub fn new() -> Self {
-        MemoryMonitor {}
+        MemoryMonitor {
+            sys: Mutex::new(System::new()),
+        }
     }
 }
 
@@ -15,7 +23,7 @@ impl MemoryMonitor {
 #[async_trait::async_trait]
 impl Monitor for MemoryMonitor {
     async fn check(&self, _config: &MonitorConfig) -> (bool, CheckResultDetail) {
-        let mut sys = System::new();
+        let mut sys = self.sys.lock().unwrap();
         // 刷新内存信息
         sys.refresh_memory();
         // 总内存（字节）

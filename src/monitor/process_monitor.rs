@@ -3,13 +3,21 @@ use super::types::{
     CheckResultDetail, MonitorConfig, ProcessBrief, ProcessMonitorResult,
 };
 use crate::tools_types::MonitorType;
+use std::sync::Mutex;
 use sysinfo::System;
 
-pub struct ProcessMonitor {}
+pub struct ProcessMonitor {
+    // 跨轮次复用同一 System：refresh_processes 会增量更新进程表
+    // （复用可保留上轮进程条目，只增删变化项），比每轮全量重建更省。
+    // check 取 &self，用 Mutex 提供内部可变性；同一任务串行调用无锁竞争
+    sys: Mutex<System>,
+}
 
 impl ProcessMonitor {
     pub fn new() -> Self {
-        ProcessMonitor {}
+        ProcessMonitor {
+            sys: Mutex::new(System::new()),
+        }
     }
 }
 
@@ -17,7 +25,7 @@ impl ProcessMonitor {
 #[async_trait::async_trait]
 impl Monitor for ProcessMonitor {
     async fn check(&self, _config: &MonitorConfig) -> (bool, CheckResultDetail) {
-        let mut sys = System::new();
+        let mut sys = self.sys.lock().unwrap();
         // 刷新进程列表信息
         sys.refresh_processes();
         // 系统进程总数
