@@ -49,30 +49,37 @@ impl CheckResultRepository {
     }
 
     // 每个监控的最新一条结果（/api/status 控制台聚合视图用）
-    // 逐监控索引化查询：WHERE monitor_id = ? ORDER BY created_at DESC LIMIT 1
-    // 走 (monitor_id, created_at) 复合索引反向扫描，O(log n)/监控。
-    // 此前 GROUP BY monitor_id + max(id) 形态需全表扫描，而本查询挂在登录控制台
-    // 每5秒轮询的/api/status上——check_result保留期内可达百万行，不可接受。
-    // 同一created_at秒内的并列由索引内rowid序（id为rowid别名）反向保证取最新id，
-    // 与旧max(id)语义等价
+    // 两次查询消除 N+1：此前按 monitor_id 逐个 SELECT ... LIMIT 1，N 个监控 N 次往返，
+    // 而本端点是登录控制台每5秒轮询的最高频DB调用——监控数上百时每轮上百次往返，
+    // 连接池争用与调度开销都随监控数线性放大。
+    // 改为固定两条查询（与监控数无关）：
+    //   1) GROUP BY monitor_id 取 max(id)，一次拿到各监控最新一条的主键
+    //   2) id IN (那批主键) 一次性把行取回
+    // id 为 rowid 别名、随插入单调递增，max(id) 即该监控最新一条，与旧 ORDER BY
+    // created_at DESC LIMIT 1 语义等价（同秒并列也由 id 序决出最新）。
+    // 两步均走已有索引（idx_check_result_monitor_created / 主键），无全表扫描
     pub fn get_latest_by_monitor(
         &self,
         monitor_ids: &[i32],
     ) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
-        use diesel::OptionalExtension;
-        let mut conn = get_connection(&self.pool)?;
-        let mut latest = Vec::with_capacity(monitor_ids.len());
-        for mid in monitor_ids {
-            if let Some(row) = check_result::table
-                .filter(check_result::monitor_id.eq(*mid))
-                .order_by(check_result::created_at.desc())
-                .first::<CheckResultModel>(&mut conn)
-                .optional()?
-            {
-                latest.push(row);
-            }
+        if monitor_ids.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(latest)
+        let mut conn = get_connection(&self.pool)?;
+        // 第1步：各监控最新一条的 id（GROUP BY 聚合，一次往返）
+        let latest_ids: Vec<Option<i32>> = check_result::table
+            .filter(check_result::monitor_id.eq_any(monitor_ids))
+            .group_by(check_result::monitor_id)
+            .select(diesel::dsl::max(check_result::id))
+            .load(&mut conn)?;
+        let ids: Vec<i32> = latest_ids.into_iter().flatten().collect();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 第2步：按主键集合一次性取回行
+        check_result::table
+            .filter(check_result::id.eq_any(ids))
+            .load::<CheckResultModel>(&mut conn)
     }
 
     // 分页查询监控结果（monitor_id为None时查询全部）
@@ -261,5 +268,48 @@ mod tests {
             .get_check_results_keyset(Some(monitor_id), None, 500)
             .unwrap();
         assert_eq!(all_target.len(), 5, "只返回目标监控的记录");
+    }
+
+    // get_latest_by_monitor 两步查询：每监控恰好一条且取最新，空输入/无记录不报错
+    #[test]
+    fn latest_by_monitor_returns_one_newest_per_monitor() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let a = create_test_monitor(&pool, "t-latest-a");
+        let b = create_test_monitor(&pool, "t-latest-b");
+        let c = create_test_monitor(&pool, "t-latest-c"); // 无任何结果，验证不报错也不返回
+        let repo = CheckResultRepository::new(pool);
+        // a 插 3 条（response_time 10/20/30，最新是30）；b 插 1 条
+        for rt in [10, 20, 30] {
+            repo.insert_check_result(&CheckResultModelInsert {
+                monitor_id: a,
+                monitor_type: "HTTP".to_string(),
+                status: if rt == 30 { 0 } else { 1 },
+                response_time: rt,
+                metadata_json: None,
+            })
+            .unwrap();
+        }
+        repo.insert_check_result(&CheckResultModelInsert {
+            monitor_id: b,
+            monitor_type: "HTTP".to_string(),
+            status: 1,
+            response_time: 77,
+            metadata_json: None,
+        })
+        .unwrap();
+
+        let latest = repo.get_latest_by_monitor(&[a, b, c]).unwrap();
+        assert_eq!(latest.len(), 2, "a、b 各一条，c 无记录被跳过");
+        let row_a = latest.iter().find(|r| r.monitor_id == a).expect("应含a");
+        assert_eq!(row_a.response_time, 30, "a 应取最新（response_time=30）");
+        assert_eq!(row_a.status, 0, "最新那条 status=0，证明取的是最新非最旧");
+        let row_b = latest.iter().find(|r| r.monitor_id == b).expect("应含b");
+        assert_eq!(row_b.response_time, 77);
+
+        // 空输入：直接返回空，不触库
+        assert!(repo.get_latest_by_monitor(&[]).unwrap().is_empty());
+        // 全部无记录：返回空
+        assert!(repo.get_latest_by_monitor(&[c]).unwrap().is_empty());
     }
 }

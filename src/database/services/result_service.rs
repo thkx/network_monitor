@@ -78,7 +78,7 @@ impl ResultService {
     }
 
     // 每个监控的最新一条结果（/api/status聚合视图用；monitor_ids由调用方传入，
-    // 逐监控索引化查询避免全表扫描——见repo注释）
+    // 固定两条查询消除 N+1、翻页代价与监控数无关——见repo注释）
     pub fn get_latest_by_monitor(
         &self,
         monitor_ids: &[i32],
