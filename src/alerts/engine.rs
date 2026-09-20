@@ -5,8 +5,10 @@
 //   THRESHOLD     —— 阈值规则（系统资源类：CPU/内存/磁盘/进程数值越限）
 // 告警防抖：consecutive_failures 连续N次命中才告警、consecutive_successes 连续M次正常才恢复
 // 通知渠道的发送与重试见 super::notify（NotifyEngine）
+// 发送确认语义：webhook首发成功（Delivered）才置位/清除抑制状态；首发失败（Deferred，
+// 已转后台重试）保持状态不变并重置防抖，下一轮达到阈值时重发——重复告警优于静默丢失
 
-use super::notify::NotifyEngine;
+use super::notify::{AlertSender, NotifyEngine};
 use super::rules::{
     detail_summary, evaluate_content, evaluate_response_code, evaluate_threshold,
     is_target_available,
@@ -17,7 +19,7 @@ use crate::tools_types::{AlertRuleTypes, AlertVerificationRules};
 
 // 告警引擎：持有通知引擎、告警规则与抑制状态，对外提供统一的check入口
 pub struct AlertsEngine {
-    notify: NotifyEngine,                // 通知引擎
+    notify: Box<dyn AlertSender>,        // 通知引擎（trait对象：测试可注入stub）
     alert_rules: AlertVerificationRules, // 告警规则配置
     // 告警抑制状态：是否处于"已告警、未恢复"状态（防止同一故障反复轰炸通知渠道）
     alerting: bool,
@@ -33,13 +35,23 @@ pub struct AlertsEngine {
 impl AlertsEngine {
     // 无持久化：Once/Monitor模式使用（没有DB主键，抑制状态仅存内存）
     pub fn new(alert_rule: AlertVerificationRules) -> Self {
+        // 先构造发送器（借用配置字段），再把配置整体移入with_sender，避免"借用后移动"
+        let notify = Box::new(NotifyEngine::new(
+            alert_rule.notify_type.clone(),
+            alert_rule.notify_config.clone(),
+        ));
+        Self::with_sender(alert_rule, notify)
+    }
+
+    // 注入发送器：生产用NotifyEngine，测试注入stub以覆盖状态机流转（无真实网络）
+    fn with_sender(alert_rule: AlertVerificationRules, notify: Box<dyn AlertSender>) -> Self {
         AlertsEngine {
             alerting: false,
             hit_streak: 0,
             ok_streak: 0,
             state: None,
-            alert_rules: alert_rule.clone(),
-            notify: NotifyEngine::new(alert_rule.notify_type, alert_rule.notify_config),
+            alert_rules: alert_rule,
+            notify,
         }
     }
 
@@ -80,6 +92,9 @@ impl AlertsEngine {
     // 告警规则check事件：状态机式告警——异常时只告警一次，恢复时发送一次恢复通知
     // 注意：失败（不可用、未拿到响应码）的监控结果同样参与检查，避免站点宕机时漏告警
     // 防抖：连续 N 次命中才告警、连续 M 次正常才恢复（缺省均为1，即保持"首次即触发"的旧行为）
+    // 发送确认：仅首发成功（Delivered）才变更抑制状态；Deferred（首发失败已转后台重试）
+    // 保持状态不变并重置防抖计数，下一轮达到阈值时重发——修复"重试耗尽后通知静默丢失
+    // 而抑制状态已置位、故障期间不再尝试"的失败模式
     pub async fn check(&mut self, check_result: &CheckResult) -> Result<(), String> {
         let failures_threshold = self.alert_rules.consecutive_failures.unwrap_or(1).max(1);
         let successes_threshold = self.alert_rules.consecutive_successes.unwrap_or(1).max(1);
@@ -89,10 +104,16 @@ impl AlertsEngine {
                 self.hit_streak = self.hit_streak.saturating_add(1);
                 self.ok_streak = 0;
                 if !self.alerting && self.hit_streak >= failures_threshold {
-                    self.notify.send_alert_message(message).await;
-                    self.alerting = true;
-                    self.hit_streak = 0;
-                    self.persist_state(true).await;
+                    let outcome = self.notify.send_alert_message(message).await;
+                    if outcome.is_delivered() {
+                        self.alerting = true;
+                        self.hit_streak = 0;
+                        self.persist_state(true).await;
+                    } else {
+                        // 首发失败（后台重试进行中）：保持未告警态，重置防抖，
+                        // 下一轮再积累consecutive_failures次命中后重发
+                        self.hit_streak = 0;
+                    }
                 }
             }
             // 未命中任何规则视为正常：连续正常达到阈值时发送一次恢复通知
@@ -101,7 +122,8 @@ impl AlertsEngine {
                 self.hit_streak = 0;
                 if self.alerting && self.ok_streak >= successes_threshold {
                     let target = check_result.target.clone().unwrap_or_default();
-                    self.notify
+                    let outcome = self
+                        .notify
                         .send_alert_message(format!(
                             "{} target: {} | {} | 异常已恢复（{}）",
                             super::RECOVERY_PREFIX,
@@ -110,9 +132,13 @@ impl AlertsEngine {
                             detail_summary(&check_result.details)
                         ))
                         .await;
-                    self.alerting = false;
+                    // 恢复通知首发失败：保持告警态，重置正常计数，
+                    // 下一轮连续正常达到阈值时重发恢复通知
+                    if outcome.is_delivered() {
+                        self.alerting = false;
+                        self.persist_state(false).await;
+                    }
                     self.ok_streak = 0;
-                    self.persist_state(false).await;
                 }
             }
         }
@@ -168,15 +194,48 @@ impl AlertsEngine {
 #[cfg(test)]
 mod tests {
     use super::AlertsEngine;
+    use super::super::notify::{AlertSender, SendOutcome};
     use crate::monitor::types::{
         CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
         MemoryMonitorResult,
     };
     use crate::tools_types::{
         AlertRuleTypes, AlertSingleRule, AlertVerificationRules, BasicAvailability,
-        ContentVerificationRules, HttpMonitorResult, MonitorType, NotifyCondition, NotifyConfig,
+        ContentVerificationRules, HttpMonitorResult, MonitorType, NotifyCondition,
         ThresholdCondition,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // stub发送器：返回可切换的固定结果，让状态机测试完全脱离网络
+    // （改造前测试依赖127.0.0.1:9拒连的"失败发送"，但首发失败不再置位alerting后不可用）
+    struct StubSender {
+        delivered: AtomicBool,
+    }
+    impl StubSender {
+        fn delivered() -> Self {
+            StubSender {
+                delivered: AtomicBool::new(true),
+            }
+        }
+        fn deferred() -> Self {
+            StubSender {
+                delivered: AtomicBool::new(false),
+            }
+        }
+        fn set_delivered(&self, v: bool) {
+            self.delivered.store(v, Ordering::SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl AlertSender for StubSender {
+        async fn send_alert_message(&self, _message: String) -> SendOutcome {
+            if self.delivered.load(Ordering::SeqCst) {
+                SendOutcome::Delivered
+            } else {
+                SendOutcome::Deferred
+            }
+        }
+    }
 
     // 构造HTTP类型的检查结果（其余字段走Default）
     fn http_result(status: bool, reachable: bool, code: Option<u16>) -> CheckResult {
@@ -196,22 +255,27 @@ mod tests {
         }
     }
 
-    fn engine_with_rules_cfg(
-        rules: Vec<AlertSingleRule>,
-        failures: Option<u32>,
-        successes: Option<u32>,
-    ) -> AlertsEngine {
-        AlertsEngine::new(AlertVerificationRules {
+    fn rules_cfg(rules: Vec<AlertSingleRule>, failures: Option<u32>, successes: Option<u32>) -> AlertVerificationRules {
+        AlertVerificationRules {
             notify_type: "FEISHU".to_string(),
-            notify_config: NotifyConfig {
-                webhook_url: "http://127.0.0.1:9".to_string(),
+            notify_config: crate::tools_types::NotifyConfig {
+                webhook_url: String::new(),
                 secret: None,
                 email: None,
             },
             rules,
             consecutive_failures: failures,
             consecutive_successes: successes,
-        })
+        }
+    }
+
+    // 缺省stub：首发即成功（Delivered），覆盖既有状态机断言
+    fn engine_with_rules_cfg(
+        rules: Vec<AlertSingleRule>,
+        failures: Option<u32>,
+        successes: Option<u32>,
+    ) -> AlertsEngine {
+        AlertsEngine::with_sender(rules_cfg(rules, failures, successes), Box::new(StubSender::delivered()))
     }
 
     fn engine_with_rules(rules: Vec<AlertSingleRule>) -> AlertsEngine {
@@ -423,6 +487,94 @@ mod tests {
                 .unwrap();
         }
         assert!(!engine.alerting);
+    }
+
+    // ---- 发送确认语义（修复"重试耗尽后通知静默丢失"）----
+
+    // 可切换结果的共享stub：Arc句柄留在测试侧，engine持有包装器
+    struct SharedStub(std::sync::Arc<StubSender>);
+    #[async_trait::async_trait]
+    impl AlertSender for SharedStub {
+        async fn send_alert_message(&self, message: String) -> SendOutcome {
+            self.0.send_alert_message(message).await
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_first_attempt_keeps_alerting_false() {
+        // 首发失败（Deferred，后台重试进行中）：抑制状态不置位，
+        // 下一轮命中达到阈值时重发——重复告警优于静默丢失
+        let mut engine = AlertsEngine::with_sender(
+            rules_cfg(vec![availability_rule()], Some(1), None),
+            Box::new(StubSender::deferred()),
+        );
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(!engine.alerting, "首发失败不应置位抑制状态");
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(!engine.alerting, "仍未成功，保持未告警态（下一轮会重发）");
+    }
+
+    #[tokio::test]
+    async fn deferred_then_delivered_eventually_suppresses() {
+        // 首发失败 → 渠道恢复后重发成功 → 抑制状态置位，后续命中不再重复告警
+        let shared = std::sync::Arc::new(StubSender::deferred());
+        let mut engine = AlertsEngine::with_sender(
+            rules_cfg(vec![availability_rule()], Some(1), None),
+            Box::new(SharedStub(shared.clone())),
+        );
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(!engine.alerting, "首发失败保持未告警态");
+        // 渠道恢复：下一轮命中重发成功，置位抑制状态
+        shared.set_delivered(true);
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(engine.alerting, "重发成功后应置位抑制状态");
+        // 后续命中被抑制，不重复发送
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(engine.alerting);
+    }
+
+    #[tokio::test]
+    async fn deferred_recovery_keeps_alerting_and_retries() {
+        // 恢复通知首发失败：保持告警态，下一轮连续正常达到阈值时重发恢复通知
+        let shared = std::sync::Arc::new(StubSender::delivered());
+        let mut engine = AlertsEngine::with_sender(
+            rules_cfg(vec![availability_rule()], Some(1), Some(1)),
+            Box::new(SharedStub(shared.clone())),
+        );
+        engine
+            .check(&http_result(true, false, None))
+            .await
+            .unwrap();
+        assert!(engine.alerting, "首发成功应置位告警态");
+        // 切换为首发失败：恢复通知发不出去，应保持告警态
+        shared.set_delivered(false);
+        engine
+            .check(&http_result(true, true, Some(200)))
+            .await
+            .unwrap();
+        assert!(engine.alerting, "恢复通知首发失败应保持告警态");
+        // 渠道恢复后重发恢复通知：成功后清除告警态
+        shared.set_delivered(true);
+        engine
+            .check(&http_result(true, true, Some(200)))
+            .await
+            .unwrap();
+        assert!(!engine.alerting, "恢复通知重发成功后应清除告警态");
     }
 
     #[test]

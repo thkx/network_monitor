@@ -1,10 +1,48 @@
 // 通知引擎：根据通知类型把告警消息发送到对应的渠道
 // 支持渠道：FEISHU（可选secret签名）、DINGTALK（可选secret自动加签）、WECOM、EMAIL（SMTP）
-// 发送失败自动转入后台退避重试（见 retry_with_backoff / RETRY_DELAYS_SECS）
+// webhook发送失败自动转入后台退避重试（见 retry_with_backoff / RETRY_DELAYS_SECS）
 
 use crate::tools_types::{NotifyConfig, NotifyType};
 use reqwest::Client;
 use std::time::Duration;
+
+// 渠道共享的webhook客户端：每次告警发送新建Client（TLS配置+连接池）纯属浪费。
+// 5秒总超时与原实现一致；loopback目标直连（系统代理不应劫持发往本机的webhook）
+static WEBHOOK_CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+
+fn webhook_client() -> Client {
+    WEBHOOK_CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("Failed to create webhook HTTP client")
+        })
+        .clone()
+}
+
+// 一次告警发送的同步结果（仅反映首次尝试，后台重试的结果无法同步得知）：
+//   Delivered —— 首次尝试即确认送达（或已整单后台化、无法同步确认的渠道，如EMAIL，乐观交付）
+//   Deferred  —— 首次尝试失败，已转入后台重试；调用方（告警状态机）不应置位抑制状态，
+//                下一轮命中时重发——重复告警的代价远小于静默丢失
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    Delivered,
+    Deferred,
+}
+
+impl SendOutcome {
+    pub(crate) fn is_delivered(self) -> bool {
+        matches!(self, SendOutcome::Delivered)
+    }
+}
+
+// 发送抽象：告警状态机（AlertsEngine）经由本trait触发通知，
+// 测试注入stub即可覆盖状态机流转，无需真实网络
+#[async_trait::async_trait]
+pub(crate) trait AlertSender: Send + Sync {
+    async fn send_alert_message(&self, message: String) -> SendOutcome;
+}
 
 // 通知引擎：根据通知类型把告警消息发送到对应的渠道
 pub struct NotifyEngine {
@@ -19,12 +57,17 @@ impl NotifyEngine {
             notify_config,
         }
     }
+}
 
-    // 根据通知方式发送告警消息（类型经NotifyType解析，大小写不敏感）
-    pub async fn send_alert_message(&self, message: String) {
+#[async_trait::async_trait]
+impl AlertSender for NotifyEngine {
+    // 根据通知方式发送告警消息（类型经NotifyType解析，大小写不敏感），返回首发结果
+    async fn send_alert_message(&self, message: String) -> SendOutcome {
         let Some(notify_type) = NotifyType::parse(&self.notify_type) else {
             tracing::warn!("未知的告警通知类型: {}", self.notify_type);
-            return;
+            // 未知渠道永远发不出去：按已处理处理，避免状态机无限重发刷日志
+            // （配置校验层已拒绝未知渠道，此路径仅存在于JSON直写数据库的场景）
+            return SendOutcome::Delivered;
         };
         match notify_type {
             NotifyType::Email => {
@@ -34,7 +77,8 @@ impl NotifyEngine {
                     tracing::error!(
                         "EMAIL告警发送失败: notify_config.email 未配置（需smtp_host/username/to）"
                     );
-                    return;
+                    // 配置缺失永远发不出去：按已处理处理，避免状态机无限重发刷日志
+                    return SendOutcome::Delivered;
                 };
                 let cfg = email_cfg.clone();
                 // 主题按消息性质区分：恢复通知与告警在邮箱里一眼可分
@@ -67,11 +111,18 @@ impl NotifyEngine {
                         ),
                     }
                 });
+                // SMTP会话整体后台化（多次往返可能远超5秒，不能阻塞监控任务循环），
+                // 首发结果无法同步得知——按乐观交付处理（置位抑制状态）。
+                // 已知取舍：邮件重试全部失败时同样会静默丢失，与webhook渠道的
+                // "首发失败保持未告警态、下轮重发"不同；代价是同步等待SMTP会话会阻塞监控任务
+                SendOutcome::Delivered
             }
             NotifyType::Sms => {
                 // 未实现的渠道显式报错而非假装成功：配置校验层已拒绝SMS，
-                // 此日志只在配置绕过校验直写数据库时出现
+                // 此日志只在配置绕过校验直写数据库时出现。
+                // 按已处理处理（状态机置位抑制），避免对永不可达的渠道无限重发刷日志
                 tracing::error!("SMS告警渠道未实现，通知未发送: {}", message);
+                SendOutcome::Delivered
             }
             NotifyType::Feishu => {
                 // 飞书自定义机器人：msg_type/content结构 + 可选签名
@@ -91,7 +142,7 @@ impl NotifyEngine {
                     &message,
                     "飞书",
                 )
-                .await;
+                .await
             }
             NotifyType::Dingtalk | NotifyType::Wecom => {
                 // 钉钉/企业微信机器人：JSON结构相同 {"msgtype":"text","text":{"content":...}}
@@ -116,28 +167,28 @@ impl NotifyEngine {
                     let sep = if url.contains('?') { "&" } else { "?" };
                     url = format!("{url}{sep}timestamp={ts}&{encoded}");
                 }
-                self.post_webhook(url.as_str(), body, &message, channel).await;
+                self.post_webhook(url.as_str(), body, &message, channel).await
             }
         }
     }
+}
 
-    // 统一的webhook POST：带5秒超时，避免通知渠道故障阻塞监控任务循环
-    // 首次发送失败后转入后台退避重试：告警因网络抖动被静默丢弃的代价太高
-    async fn post_webhook(&self, url: &str, body: serde_json::Value, message: &str, channel: &str) {
-        let client = match Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("{}告警发送失败，创建HTTP客户端异常: {}", channel, e);
-                return;
-            }
-        };
+impl NotifyEngine {
+    // 统一的webhook POST：带5秒超时（渠道共享的WEBHOOK_CLIENT），避免通知渠道故障阻塞监控任务循环。
+    // 返回首发结果：成功 → Delivered；失败 → 转入后台退避重试并返回 Deferred，
+    // 告警状态机据此保持未告警态、下一轮命中时重发（重复告警优于静默丢失）
+    async fn post_webhook(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+        message: &str,
+        channel: &str,
+    ) -> SendOutcome {
+        let client = webhook_client();
         match Self::try_post(&client, url, &body, channel).await {
             Ok(()) => {
                 tracing::info!("{}告警发送成功: {}", channel, message);
-                return;
+                return SendOutcome::Delivered;
             }
             Err(e) => {
                 tracing::error!(
@@ -170,6 +221,7 @@ impl NotifyEngine {
                 Err(e) => tracing::error!("{}告警重试全部失败，通知可能丢失: {}（{}）", channel, message, e),
             }
         });
+        SendOutcome::Deferred
     }
 
     // 单次webhook发送尝试：HTTP 2xx 且业务码为成功才算成功
@@ -364,6 +416,7 @@ mod tests {
         // 连接被拒（端口9）时try_post应快速返回Err，且错误信息含上下文
         let client = Client::builder()
             .timeout(Duration::from_millis(500))
+            .no_proxy() // 隔离系统代理：否则发往127.0.0.1的探测会被代理劫持
             .build()
             .unwrap();
         let body = serde_json::json!({"msg_type": "text", "content": {"text": "t"}});
@@ -437,7 +490,7 @@ mod tests {
         use reqwest::Client;
         // HTTP 200但errcode非零：旧实现会误判成功导致告警静默丢失，必须报错并触发重试
         let addr = spawn_fake_webhook(canned_200(r#"{"errcode":310000,"errmsg":"sign not match"}"#));
-        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        let client = Client::builder().timeout(Duration::from_secs(2)).no_proxy().build().unwrap();
         let body = serde_json::json!({"msgtype": "text", "text": {"content": "t"}});
         let r = NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
         let err = r.expect_err("200+errcode!=0应判为业务失败");
@@ -450,7 +503,7 @@ mod tests {
         use std::time::Duration;
         use reqwest::Client;
         let addr = spawn_fake_webhook(canned_200(r#"{"errcode":0,"errmsg":"ok"}"#));
-        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        let client = Client::builder().timeout(Duration::from_secs(2)).no_proxy().build().unwrap();
         let body = serde_json::json!({"msgtype": "text", "text": {"content": "t"}});
         let r = NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
         assert!(r.is_ok(), "errcode=0应视为发送成功: {r:?}");
