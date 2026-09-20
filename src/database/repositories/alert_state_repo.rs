@@ -19,7 +19,7 @@ impl AlertStateRepository {
 
     // 读取抑制状态；无记录视为未告警
     pub fn get_alerting(&self, monitor_id: i32) -> Result<bool, diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         let state: Option<AlertStateModel> = alert_state::table
             .find(monitor_id)
             .first::<AlertStateModel>(&mut conn)
@@ -29,7 +29,7 @@ impl AlertStateRepository {
 
     // 读取全部抑制状态（/metrics 端点渲染 monitor_alerting 用）
     pub fn get_all_alerting(&self) -> Result<Vec<(i32, bool)>, diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         let rows: Vec<(i32, i32)> = alert_state::table
             .select((alert_state::monitor_id, alert_state::alerting))
             .load(&mut conn)?;
@@ -38,7 +38,7 @@ impl AlertStateRepository {
 
     // 保存抑制状态（upsert：不存在则插入，存在则更新）
     pub fn set_alerting(&self, monitor_id: i32, alerting: bool) -> Result<(), diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         let alerting_v = if alerting { 1 } else { 0 };
         diesel::insert_into(alert_state::table)
             .values(AlertStateModelInsert {

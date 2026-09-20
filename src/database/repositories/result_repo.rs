@@ -18,7 +18,7 @@ impl CheckResultRepository {
         &self,
         insert: &CheckResultModelInsert,
     ) -> Result<usize, diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         diesel::insert_into(check_result::table)
             .values(insert)
             .execute(&mut conn)
@@ -26,7 +26,7 @@ impl CheckResultRepository {
 
     // 删除 N 天前的监控结果（数据保留策略：check_result只增不删会无限膨胀）
     pub fn delete_older_than_days(&self, days: i64) -> Result<usize, diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         // created_at由SQLite的CURRENT_TIMESTAMP写入，是UTC时间，这里同样取UTC做比较
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).naive_utc();
         diesel::delete(check_result::table.filter(check_result::created_at.lt(Some(cutoff))))
@@ -42,7 +42,7 @@ impl CheckResultRepository {
         if inserts.is_empty() {
             return Ok(0);
         }
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         diesel::insert_into(check_result::table)
             .values(inserts)
             .execute(&mut conn)
@@ -60,7 +60,7 @@ impl CheckResultRepository {
         monitor_ids: &[i32],
     ) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
         use diesel::OptionalExtension;
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         let mut latest = Vec::with_capacity(monitor_ids.len());
         for mid in monitor_ids {
             if let Some(row) = check_result::table
@@ -82,7 +82,7 @@ impl CheckResultRepository {
         page: i64,
         page_size: i64,
     ) -> Result<(Vec<CheckResultModel>, i64), diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         let page_no = page.max(1);
         let page_sz = page_size.max(1);
         let offset = (page_no - 1) * page_sz;
@@ -114,7 +114,7 @@ impl CheckResultRepository {
         before_id: Option<i32>,
         limit: i64,
     ) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
-        let mut conn = get_connection(&self.pool);
+        let mut conn = get_connection(&self.pool)?;
         let lim = limit.clamp(1, 500);
         let mut query = check_result::table.into_boxed();
         if let Some(mid) = monitor_id {

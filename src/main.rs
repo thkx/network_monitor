@@ -377,8 +377,10 @@ fn flush_batch(result_service: &ResultService, buffer: &mut Vec<MonitorResultMes
 
 // 攒批落库的异步包装：flush_batch内的批量INSERT是同步阻塞调用，
 // 在async消费者任务内直接执行会卡住runtime线程，挪到spawn_blocking阻塞池。
-// 缓冲区经mem::take移入阻塞任务再带回， Join失败（阻塞任务panic）时退化为空缓冲，
-// 数据不重复写入；CSV日志另有完整备份
+// 缓冲区经mem::take移入阻塞任务：正常完成时flush_batch已清空并带回空缓冲；
+// Join失败（阻塞任务panic）时数据仍在移入的副本里，随JoinError丢失——
+// 因此从JoinError的panic载荷无法取回，改为在移入前保留条数用于日志，
+// 并把未落库数据的丢失显式记录（CSV日志另有完整备份，可据此人工补录）
 async fn flush_batch_async(
     result_service: &ResultService,
     buffer: &mut Vec<MonitorResultMessage>,
@@ -388,13 +390,25 @@ async fn flush_batch_async(
     }
     let svc = result_service.clone();
     let taken = std::mem::take(buffer);
-    *buffer = tokio::task::spawn_blocking(move || {
+    let dropped_count = taken.len();
+    match tokio::task::spawn_blocking(move || {
         let mut buf = taken;
         flush_batch(&svc, &mut buf);
-        buf
+        buf // flush_batch末尾clear，正常路径带回空Vec
     })
     .await
-    .unwrap_or_default();
+    {
+        Ok(buf) => *buffer = buf,
+        // 阻塞任务panic：移入的数据随JoinError丢失，无法取回。
+        // 显式告警而非静默吞掉——这批结果在DB里缺失，需依赖CSV日志人工核对
+        Err(e) => {
+            tracing::error!(
+                "攒批落库任务panic，{}条结果未能写入数据库（CSV日志仍有记录，可据此核对）: {}",
+                dropped_count,
+                e
+            );
+        }
+    }
 }
 
 // 把JSON配置导入monitor_config表（name有唯一约束，按名称去重保证幂等）
