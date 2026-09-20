@@ -171,7 +171,14 @@ pub(super) fn detail_summary(details: &CheckResultDetail) -> String {
             Some(code) => format!("状态码 {}，耗时 {} ms", code, r.performance_timings.total_time),
             None => format!("请求失败（{}）", failure_reason(r)),
         },
-        CheckResultDetail::Icmp(r) => format!("存活 {}，耗时 {} ms", r.is_alive, r.elapsed_ms),
+        // 有真实链路 RTT 时优先展示（含总耗时便于对比进程开销）；否则只报墙钟耗时
+        CheckResultDetail::Icmp(r) => match r.rtt_ms {
+            Some(rtt) => format!(
+                "存活 {}，RTT {:.2} ms（探测总耗时 {} ms）",
+                r.is_alive, rtt, r.elapsed_ms
+            ),
+            None => format!("存活 {}，探测耗时 {} ms", r.is_alive, r.elapsed_ms),
+        },
         CheckResultDetail::Tcp(r) => format!("连接 {}，耗时 {} ms", r.connected, r.elapsed_ms),
         CheckResultDetail::Udp(r) => format!(
             "响应 {}（{}），耗时 {} ms",
@@ -250,6 +257,7 @@ mod tests {
             details: CheckResultDetail::Icmp(IcmpMonitorResult {
                 is_alive: false,
                 elapsed_ms: 30,
+                rtt_ms: None,
             }),
         };
         assert!(!is_target_available(&down));

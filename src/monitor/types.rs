@@ -247,7 +247,15 @@ impl CheckResult {
                 r.performance_timings.total_time,
                 r.basic_available.res_status_code,
             ),
-            CheckResultDetail::Icmp(r) => (r.is_alive, r.elapsed_ms, None),
+            // ICMP 耗时优先取解析到的真实链路 RTT（四舍五入到毫秒），
+            // 解析失败回退到墙钟总耗时（保持旧行为，不劣化）
+            CheckResultDetail::Icmp(r) => (
+                r.is_alive,
+                r.rtt_ms
+                    .map(|rtt| rtt.round().max(0.0) as u128)
+                    .unwrap_or(r.elapsed_ms),
+                None,
+            ),
             CheckResultDetail::Tcp(r) => (r.connected, r.elapsed_ms, None),
             CheckResultDetail::Udp(r) => (r.response_received, r.elapsed_ms, None),
             CheckResultDetail::Dns(r) => (r.resolved, r.elapsed_ms, None),
@@ -352,7 +360,13 @@ pub struct ProcessBrief {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct IcmpMonitorResult {
     pub is_alive: bool,   // 目标主机是否存活
-    pub elapsed_ms: u128, // ping耗时，单位毫秒
+    // 探测总耗时（墙钟），单位毫秒：含子进程 fork/exec、ping 自身 DNS 解析等开销，
+    // 不等于链路延迟。真实链路 RTT 见 rtt_ms（从 ping 输出解析，可能取不到）
+    pub elapsed_ms: u128,
+    // 从 ping 输出解析出的单包 ICMP 往返时延（毫秒）；解析失败为 None。
+    // 这是真实链路延迟，不含子进程开销——response_time 落库时优先取它
+    #[serde(default)]
+    pub rtt_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

@@ -119,6 +119,7 @@ mod tests {
             details: CheckResultDetail::Icmp(IcmpMonitorResult {
                 is_alive: true,
                 elapsed_ms: 42,
+                rtt_ms: None,
             }),
         };
         service.persist_check(monitor_id, &result).unwrap();
@@ -153,6 +154,7 @@ mod tests {
             details: CheckResultDetail::Icmp(IcmpMonitorResult {
                 is_alive: alive,
                 elapsed_ms: 10,
+                rtt_ms: None,
             }),
         };
         // 插入顺序：a旧 a新 b旧 b新（同秒内id严格递增）

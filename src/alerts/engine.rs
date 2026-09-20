@@ -383,6 +383,7 @@ mod tests {
             details: CheckResultDetail::Icmp(IcmpMonitorResult {
                 is_alive: true,
                 elapsed_ms: 30,
+                rtt_ms: None,
             }),
         };
         assert!(engine.evaluate(&result).is_none());
@@ -399,6 +400,7 @@ mod tests {
             details: CheckResultDetail::Icmp(IcmpMonitorResult {
                 is_alive: false,
                 elapsed_ms: 30,
+                rtt_ms: None,
             }),
         };
         assert!(engine.evaluate(&down).is_some());
@@ -706,6 +708,7 @@ mod tests {
             details: CheckResultDetail::Icmp(IcmpMonitorResult {
                 is_alive: false,
                 elapsed_ms: 30,
+                rtt_ms: None,
             }),
         };
         assert!(engine.evaluate(&down).is_none());
