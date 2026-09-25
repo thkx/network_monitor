@@ -145,7 +145,10 @@ mod tests {
 
     #[test]
     fn monitor_crud_and_unique_name() {
-        let repo = MonitorRepository::new(Arc::new(test_pool(tempfile::tempdir().unwrap().path())));
+        // tempdir守卫必须持有到测试结束：内联在表达式里guard会立即drop，
+        // Linux当场删除库文件导致后续写入报readonly（Windows因文件被占用删不掉而侥幸通过）
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MonitorRepository::new(Arc::new(test_pool(dir.path())));
         // 创建并回读
         let created = repo.create_monitor(&insert("t1")).unwrap();
         assert_eq!(created.name.as_deref(), Some("t1"));
@@ -176,7 +179,9 @@ mod tests {
     // tag 筛选 + 去重标签列表
     #[test]
     fn list_filters_by_tag_and_distinct_tags() {
-        let repo = MonitorRepository::new(Arc::new(test_pool(tempfile::tempdir().unwrap().path())));
+        // 同上：守卫必须绑定持有，防Linux下目录被提前删除
+        let dir = tempfile::tempdir().unwrap();
+        let repo = MonitorRepository::new(Arc::new(test_pool(dir.path())));
         let with_tag = |name: &str, tag: Option<&str>| MonitorConfigInsert {
             name: Some(name.to_string()),
             target: format!("https://{name}.com"),
