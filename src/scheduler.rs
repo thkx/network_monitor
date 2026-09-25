@@ -101,7 +101,10 @@ impl Scheduler {
         };
         // 飞书webhook还是占位符时提前提示，避免告警真正触发时才发现发不出去
         if let Some(alert) = entry.alert_rules.as_ref()
-            && alert.notify_config.webhook_url.contains("you/to/path")
+            && alert
+                .notify_config
+                .webhook_url
+                .contains(crate::domain::WEBHOOK_PLACEHOLDER)
         {
             tracing::warn!(
                 "监控 {} (id={}) 的 webhook_url 仍是占位符，告警通知将发送失败",

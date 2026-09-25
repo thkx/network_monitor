@@ -89,6 +89,10 @@ pub struct AlertVerificationRules {
     pub consecutive_successes: Option<u32>,
 }
 
+/// webhook_url 占位符片段：示例配置里未替换真实地址时携带此片段，
+/// 调度器加载配置时据此提前告警（避免真正触发告警时才发现发不出去）。
+pub const WEBHOOK_PLACEHOLDER: &str = "you/to/path";
+
 /// 告警通知渠道配置
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NotifyConfig {
