@@ -29,6 +29,22 @@ fn system_resolver() -> Option<trust_dns_resolver::TokioAsyncResolver> {
         .clone()
 }
 
+// TLS 连接器的进程级缓存：TlsConnector::new() 每次要初始化平台 TLS 栈（加载根证书库等），
+// 而连接器本身可跨连接复用（connect 只需 &self）——此前每次 HTTPS 检查都重建一个纯属浪费。
+// 仿 SYSTEM_RESOLVER：构造失败降级为 None（跳过 TLS 计时），不再让整个探测 ? 提前失败。
+static TLS_CONNECTOR: std::sync::OnceLock<Option<TokioTlsConnector>> = std::sync::OnceLock::new();
+
+fn shared_tls_connector() -> Option<&'static TokioTlsConnector> {
+    TLS_CONNECTOR
+        .get_or_init(|| {
+            TlsConnector::new()
+                .map(TokioTlsConnector::from)
+                .map_err(|e| tracing::warn!("TLS 连接器初始化失败，跳过TLS计时: {e}"))
+                .ok()
+        })
+        .as_ref()
+}
+
 // 计算 性能监控相关数据 DNS TCP TLS 三个数据耗时 以及在连接过程中SSL证书相关信息
 pub async fn get_dns_tcp_tls_performance(
     url: &str,
@@ -49,9 +65,9 @@ pub async fn get_dns_tcp_tls_performance(
 
     let per_addr_timeout = Duration::from_secs(3);
     let is_https = url.scheme() == "https";
-    // 复用 TLS 连接器
+    // 复用进程级缓存的 TLS 连接器（HTTPS 才需要）
     let tls_connector = if is_https {
-        Some(TokioTlsConnector::from(TlsConnector::new()?))
+        shared_tls_connector()
     } else {
         None
     };
@@ -70,7 +86,7 @@ pub async fn get_dns_tcp_tls_performance(
             }
             _ => continue, // 超时或连接失败，尝试下一个地址
         };
-        if let Some(tls) = &tls_connector {
+        if let Some(tls) = tls_connector {
             let hs_start = Instant::now();
             let hs_res = timeout(per_addr_timeout, tls.connect(host, tcp_stream)).await;
             if let Ok(Ok(_tls_stream)) = hs_res {
