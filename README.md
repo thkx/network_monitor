@@ -247,6 +247,7 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 | 方法与路径                     | 说明                                       |
 | ------------------------------ | ------------------------------------------ |
 | `GET /`                        | Web 控制台页面                             |
+| `GET /healthz`                 | 存活探针（免认证，恒 200 `{"status":"ok"}`） |
 | `GET /metrics`                 | Prometheus 指标端点                        |
 | `GET /api/status`              | 控制台聚合视图（配置+最新结果+告警状态）   |
 | `GET /api/monitors`            | 监控配置分页查询（`enabled` / `tag` 可选筛选） |
@@ -291,7 +292,7 @@ docker compose up -d
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（152个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
+cargo test          # 运行全部测试（154个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```

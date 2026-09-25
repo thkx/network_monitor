@@ -218,6 +218,10 @@ impl Auth {
         if path == "/login" && req.method() == Method::POST {
             return None;
         }
+        // 健康探针放行：存活检查无敏感信息，需对编排器/负载均衡免认证开放
+        if path == "/healthz" && req.method() == Method::GET {
+            return None;
+        }
         // 控制台静态页放行：页面本身无敏感数据，401由页面JS请求/api/*时触发，
         // 弹出登录浮层（否则HTML加载不出来，用户只能看到裸401 JSON）
         if path == "/" && req.method() == Method::GET {
@@ -575,6 +579,24 @@ mod tests {
         let req = test::TestRequest::get().uri("/api/monitors").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn healthz_is_allowed_without_session() {
+        use actix_web::test;
+        use actix_web::web;
+
+        let store = Arc::new(Mutex::new(SessionStore::new()));
+        let app = test::init_service(
+            actix_web::App::new()
+                .wrap(Auth::new(store, config(true)))
+                .route("/healthz", web::get().to(|| async { "ok" })),
+        )
+        .await;
+        // 认证已启用、无cookie：/healthz 仍应放行（编排器探活免认证）
+        let req = test::TestRequest::get().uri("/healthz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
     }
 
     #[actix_web::test]

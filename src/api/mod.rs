@@ -3,6 +3,7 @@ pub mod handles;
 use actix_web::web;
 use handles::auth_handlers;
 use handles::console_handlers;
+use handles::health_handlers;
 use handles::metrics_handlers;
 use handles::monitor_handlers;
 use handles::result_handlers;
@@ -16,6 +17,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/login", web::post().to(auth_handlers::login));
     cfg.route("/logout", web::post().to(auth_handlers::logout));
     cfg.route("/metrics", web::get().to(metrics_handlers::get_metrics));
+    cfg.route("/healthz", web::get().to(health_handlers::get_healthz));
     cfg.service(
         web::scope("/api")
             .route(
