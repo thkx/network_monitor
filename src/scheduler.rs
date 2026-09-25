@@ -9,13 +9,13 @@ use tokio::task::JoinHandle;
 
 use crate::alerts::AlertsEngine;
 use crate::async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
-use crate::database::connect_db::SqlitePool;
+use crate::database::pool::SqlitePool;
 use crate::database::models::MonitorConfigModel;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::database::services::monitor_service::MonitorService;
 use crate::monitor::MonitorFactory;
 use crate::monitor::types::MonitorConfig;
-use crate::tools_types::{SelfDefineMonitorConfig, display_name};
+use crate::domain::{SelfDefineMonitorConfig, display_name};
 
 pub struct Scheduler {
     tasks: HashMap<i32, JoinHandle<()>>,
@@ -141,7 +141,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::Scheduler;
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use crate::database::services::monitor_service::MonitorService;
@@ -149,7 +149,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     // CPU类型监控：无网络依赖，任务可在测试内真实执行
-    fn insert_cpu(pool: &Arc<crate::database::connect_db::SqlitePool>, name: &str) -> i32 {
+    fn insert_cpu(pool: &Arc<crate::database::pool::SqlitePool>, name: &str) -> i32 {
         MonitorRepository::new(pool.clone())
             .create_monitor(&MonitorConfigInsert {
                 name: Some(name.to_string()),
@@ -166,7 +166,7 @@ mod tests {
             .id
     }
 
-    fn set_enabled(pool: &Arc<crate::database::connect_db::SqlitePool>, id: i32, enabled: bool) {
+    fn set_enabled(pool: &Arc<crate::database::pool::SqlitePool>, id: i32, enabled: bool) {
         MonitorRepository::new(pool.clone())
             .update_monitor(
                 id,
@@ -207,7 +207,7 @@ mod tests {
             .expect("通道不应关闭");
         assert!(msg.route.monitor_id.is_some(), "Server模式结果应带主键");
         assert!(
-            matches!(msg.result.monitor_type, crate::tools_types::MonitorType::Cpu),
+            matches!(msg.result.monitor_type, crate::domain::MonitorType::Cpu),
             "应为CPU监控结果"
         );
 

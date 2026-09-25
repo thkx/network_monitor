@@ -5,7 +5,7 @@
 //   其他 → builder_dangerous_no_tls()：明文直连（仅建议本地relay场景，发送时日志WARN）
 // 认证：password为空时跳过凭据（适配内部免认证relay），否则AUTH机制由lettre协商
 
-use crate::tools_types::EmailNotifyConfig;
+use crate::domain::EmailNotifyConfig;
 use lettre::{
     message::header::ContentType,
     message::Mailbox,
@@ -90,7 +90,7 @@ pub async fn send_mail(cfg: &EmailNotifyConfig, subject: &str, body: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::send_mail;
-    use crate::tools_types::EmailNotifyConfig;
+    use crate::domain::EmailNotifyConfig;
 
     // 本地假SMTP服务器：按脚本逐行回响应，收集收到的命令行供断言
     fn spawn_fake_smtp() -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {

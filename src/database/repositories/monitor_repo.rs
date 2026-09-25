@@ -1,4 +1,4 @@
-use crate::database::connect_db::{SqlitePool, get_connection};
+use crate::database::pool::{SqlitePool, get_connection};
 use crate::database::models::{MonitorConfigInsert, MonitorConfigModel, MonitorConfigUpdate};
 use crate::database::schema::monitor_config;
 use diesel::prelude::*;
@@ -125,7 +125,7 @@ impl MonitorRepository {
 #[cfg(test)]
 mod tests {
     use super::{MonitorConfigInsert, MonitorConfigUpdate, MonitorRepository};
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use std::sync::Arc;
 
     fn insert(name: &str) -> MonitorConfigInsert {

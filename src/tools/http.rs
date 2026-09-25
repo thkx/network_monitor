@@ -1,4 +1,4 @@
-use crate::tools_types::CertificateInfo;
+use crate::domain::CertificateInfo;
 use std::io;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -56,7 +56,7 @@ pub async fn get_dns_tcp_tls_performance(
     } else {
         None
     };
-    let mut ssl_certificate_info: Option<crate::tools_types::CertificateInfo> = None;
+    let mut ssl_certificate_info: Option<crate::domain::CertificateInfo> = None;
     for ip in ips.iter() {
         let addr = std::net::SocketAddr::new(ip, port);
         let start_tcp = std::time::Instant::now();

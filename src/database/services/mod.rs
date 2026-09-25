@@ -2,7 +2,7 @@ pub mod monitor_service;
 pub mod result_service;
 
 use crate::database::models::MonitorConfigInsert;
-use crate::tools_types::SelfDefineMonitorConfig;
+use crate::domain::SelfDefineMonitorConfig;
 
 /// 把页面/JSON提交的监控配置项转换为数据库插入结构
 /// name取target（无target的系统类监控取监控类型名），config_json保存完整原始配置用于还原

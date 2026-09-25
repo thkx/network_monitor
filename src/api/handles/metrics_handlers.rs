@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use actix_web::web;
 
-use crate::database::connect_db::SqlitePool;
+use crate::database::pool::SqlitePool;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::metrics::MetricsRegistry;
 

@@ -79,7 +79,7 @@ pub async fn get_check_results(
 #[cfg(test)]
 mod tests {
     use super::get_check_results;
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::models::{CheckResultModel, CheckResultModelInsert};
     use crate::database::repositories::result_repo::CheckResultRepository;
     use crate::database::repositories::test_support::create_test_monitor;

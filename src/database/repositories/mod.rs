@@ -6,7 +6,7 @@ pub mod alert_state_repo;
 // （check_result/alert_state 的 monitor_id 外键指向 monitor_config，测试需先建父行）
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::database::connect_db::SqlitePool;
+    use crate::database::pool::SqlitePool;
     use crate::database::models::MonitorConfigInsert;
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use std::sync::Arc;

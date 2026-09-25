@@ -30,7 +30,7 @@ use scheduler::Scheduler;
 
 // 数据库持久化模块
 mod database;
-use database::connect_db::establish_database_connection;
+use database::pool::establish_database_connection;
 use database::repositories::monitor_repo::MonitorRepository;
 use database::repositories::result_repo::CheckResultRepository;
 use database::services::build_monitor_insert;
@@ -48,9 +48,9 @@ use monitor::types::{CheckResult, CheckResultDetail, MonitorConfig};
 // 工具模块
 mod tools;
 
-// 全局通用的类型定义模块
-mod tools_types;
-use tools_types::{SelfDefineMonitorConfig, display_name};
+// 全局通用的领域类型定义模块（输入配置 / 探测结果 / 告警通知）
+mod domain;
+use domain::{SelfDefineMonitorConfig, display_name};
 
 use actix_web::{App, HttpServer, web};
 use clap::Parser;

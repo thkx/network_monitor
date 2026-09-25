@@ -1,36 +1,49 @@
 pub mod types;
-use crate::tools_types::MonitorType; // 全局通用的类型定义模块
+use crate::domain::MonitorType; // 全局通用的类型定义模块
 
-// 引进特征对象
-pub mod monitor_trait;
-pub use monitor_trait::Monitor;
+// 引进特征对象：CheckResultDetail/MonitorConfig 在本模块的 types 子模块（crate::monitor::types），
+// 注意与 crate::domain（全局类型）区分——此处必须用 self::types，不能写 super::types
+use self::types::{CheckResultDetail, MonitorConfig};
+// 定义监控类型的 trait 后续的不同的监控类型都实现这个 trait
+// 在这里添加 Send 和 Sync 作为父 trait
+// Send: 允许在线程间移动
+// Sync: 允许在线程间共享引用 (&T)
+// 对于 tokio::spawn 和多线程异步，这两个通常都需要。
+#[async_trait::async_trait]
+pub trait Monitor: Send + Sync {
+    // 引擎只负责产出内容（任务是否执行成功 + 具体结果详情），
+    // 结果信封（id/monitor_type/target）由包装层统一组装
+    async fn check(&self, config: &MonitorConfig) -> (bool, CheckResultDetail);
+    // 引擎自述身份：类型字段的唯一事实来源
+    fn get_type(&self) -> MonitorType;
+}
 
 // 声明具体的监控引擎
-mod cpu_monitor;
-mod disk_monitor;
-mod dns_monitor;
-mod ftp_monitor;
-mod http_monitor;
-mod icmp_monitor;
-mod memory_monitor;
-mod process_monitor;
-mod tcp_monitor;
-mod traceroute_monitor;
-mod udp_monitor;
-mod unknown_monitor;
+mod cpu;
+mod disk;
+mod dns;
+mod ftp;
+mod http;
+mod icmp;
+mod memory;
+mod process;
+mod tcp;
+mod traceroute;
+mod udp;
+mod unknown;
 // 不同类型的监控系统
-use cpu_monitor::CpuMonitor;
-use disk_monitor::DiskMonitor;
-use dns_monitor::DnsMonitor;
-use ftp_monitor::FtpMonitor;
-use http_monitor::HttpMonitor;
-use icmp_monitor::IcmpMonitor;
-use memory_monitor::MemoryMonitor;
-use process_monitor::ProcessMonitor;
-use tcp_monitor::TcpMonitor;
-use traceroute_monitor::TracerouteMonitor;
-use udp_monitor::UdpMonitor;
-use unknown_monitor::UnknownMonitor;
+use cpu::CpuMonitor;
+use disk::DiskMonitor;
+use dns::DnsMonitor;
+use ftp::FtpMonitor;
+use http::HttpMonitor;
+use icmp::IcmpMonitor;
+use memory::MemoryMonitor;
+use process::ProcessMonitor;
+use tcp::TcpMonitor;
+use traceroute::TracerouteMonitor;
+use udp::UdpMonitor;
+use unknown::UnknownMonitor;
 
 // 定义监控工厂
 pub struct MonitorFactory;

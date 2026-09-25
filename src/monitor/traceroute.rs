@@ -1,6 +1,6 @@
-use super::monitor_trait::Monitor;
+use super::Monitor;
 use super::types::{CheckResultDetail, MonitorConfig, TracerouteMonitorResult};
-use crate::tools_types::MonitorType;
+use crate::domain::MonitorType;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;

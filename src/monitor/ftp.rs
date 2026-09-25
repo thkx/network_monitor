@@ -1,7 +1,7 @@
-use super::monitor_trait::Monitor;
+use super::Monitor;
 use super::types::{CheckResultDetail, FtpMonitorResult, MonitorConfig};
 use crate::tools::parse_host_port;
-use crate::tools_types::MonitorType;
+use crate::domain::MonitorType;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

@@ -2,7 +2,7 @@
 // （从 monitor_handlers 抽出：校验规则独立演进，与 handler 编排逻辑解耦）
 use regex::Regex;
 
-use crate::tools_types::{
+use crate::domain::{
     AlertRuleTypes, ContentVerificationRules, NotifyType, SelfDefineMonitorConfig,
 };
 
@@ -97,7 +97,7 @@ pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web:
                         "THRESHOLD 规则必须配置 threshold 条件",
                     ));
                 };
-                if crate::tools_types::CompareOp::parse(&th.op).is_none() {
+                if crate::domain::CompareOp::parse(&th.op).is_none() {
                     return Err(actix_web::error::ErrorBadRequest(format!(
                         "THRESHOLD 规则的 op 非法: {:?}（支持 > >= < <= ==）",
                         th.op
@@ -112,7 +112,7 @@ pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web:
 #[cfg(test)]
 mod tests {
     use super::validate_config;
-    use crate::tools_types::SelfDefineMonitorConfig;
+    use crate::domain::SelfDefineMonitorConfig;
 
     fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
         serde_json::from_str(json).expect("测试JSON应可反序列化")

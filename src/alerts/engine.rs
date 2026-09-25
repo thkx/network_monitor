@@ -15,7 +15,7 @@ use super::rules::{
 };
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::monitor::types::CheckResult;
-use crate::tools_types::{AlertRuleTypes, AlertVerificationRules};
+use crate::domain::{AlertRuleTypes, AlertVerificationRules};
 
 // 告警引擎：持有通知引擎、告警规则与抑制状态，对外提供统一的check入口
 pub struct AlertsEngine {
@@ -199,7 +199,7 @@ mod tests {
         CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
         MemoryMonitorResult,
     };
-    use crate::tools_types::{
+    use crate::domain::{
         AlertRuleTypes, AlertSingleRule, AlertVerificationRules, BasicAvailability,
         ContentVerificationRules, HttpMonitorResult, MonitorType, NotifyCondition,
         ThresholdCondition,
@@ -258,7 +258,7 @@ mod tests {
     fn rules_cfg(rules: Vec<AlertSingleRule>, failures: Option<u32>, successes: Option<u32>) -> AlertVerificationRules {
         AlertVerificationRules {
             notify_type: "FEISHU".to_string(),
-            notify_config: crate::tools_types::NotifyConfig {
+            notify_config: crate::domain::NotifyConfig {
                 webhook_url: String::new(),
                 secret: None,
                 email: None,
@@ -637,12 +637,12 @@ mod tests {
         result
     }
 
-    // 别名避免直接依赖crate::tools_types的完整路径（ContentVerificationRulesResult）
-    type ContentVerificationRulesResultAlias = crate::tools_types::ContentVerificationRulesResult;
+    // 别名避免直接依赖crate::domain的完整路径（ContentVerificationRulesResult）
+    type ContentVerificationRulesResultAlias = crate::domain::ContentVerificationRulesResult;
 
     fn failed_rule(kind: ContentVerificationRules, content: &str) -> ContentVerificationRulesResultAlias {
         ContentVerificationRulesResultAlias {
-            rules: crate::tools_types::ContentVerificationRulesSingle {
+            rules: crate::domain::ContentVerificationRulesSingle {
                 rule_type: kind,
                 rule_content: content.to_string(),
                 rule_description: String::new(),

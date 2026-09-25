@@ -2,7 +2,7 @@
 // 支持渠道：FEISHU（可选secret签名）、DINGTALK（可选secret自动加签）、WECOM、EMAIL（SMTP）
 // webhook发送失败自动转入后台退避重试（见 retry_with_backoff / RETRY_DELAYS_SECS）
 
-use crate::tools_types::{NotifyConfig, NotifyType};
+use crate::domain::{NotifyConfig, NotifyType};
 use reqwest::Client;
 use std::time::Duration;
 

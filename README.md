@@ -298,14 +298,14 @@ src/
 ├── alerts/mod.rs        # 告警引擎（规则评估状态机 + 通知渠道）
 ├── api/                 # Actix-web 路由与处理器（含配置校验）
 ├── database/
-│   ├── connect_db.rs    # 连接池、WAL、迁移
+│   ├── pool.rs          # 连接池、WAL、迁移
 │   ├── schema.rs        # diesel 表定义
 │   ├── models.rs        # 数据模型
 │   ├── repositories/    # 仓库层（monitor_config/check_result/alert_state）
 │   └── services/        # 业务服务层
 ├── monitor/             # 12种监控引擎（策略模式 + 工厂）
 ├── tools/               # HTTP/TLS 探测、SMTP邮件（lettre封装）、重试策略
-├── tools_types.rs       # 全局类型定义
+├── domain/              # 全局领域类型（result 结果 / config 输入配置 / alert 告警通知）
 └── csv_logger.rs        # CSV 日志（check_id 与数据库关联）
 ```
 

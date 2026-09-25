@@ -1,8 +1,8 @@
-use super::monitor_trait::Monitor;
+use super::Monitor;
 use super::types::{
     CheckResultDetail, MonitorConfig, ProcessBrief, ProcessMonitorResult,
 };
-use crate::tools_types::MonitorType;
+use crate::domain::MonitorType;
 use std::sync::Mutex;
 use sysinfo::System;
 

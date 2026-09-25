@@ -1,6 +1,6 @@
-use super::monitor_trait::Monitor;
+use super::Monitor;
 use super::types::{CheckResultDetail, IcmpMonitorResult, MonitorConfig};
-use crate::tools_types::MonitorType;
+use crate::domain::MonitorType;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;

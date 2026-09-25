@@ -11,7 +11,7 @@ use crate::database::services::result_service::ResultService;
 use crate::metrics::MetricsRegistry;
 use crate::monitor::MonitorFactory;
 use crate::scheduler::Scheduler;
-use crate::tools_types::SelfDefineMonitorConfig;
+use crate::domain::SelfDefineMonitorConfig;
 
 use super::response::{
     clamp_pagination, internal_error, DefaultResponseObj, PageData, PaginationParams,
@@ -108,7 +108,7 @@ pub async fn create_monitor(
                     code: 409,
                     message: format!(
                         "监控名称已存在: {}（按target/类型生成，请先删除同名配置）",
-                        crate::tools_types::display_name(&entry)
+                        crate::domain::display_name(&entry)
                     ),
                     data: serde_json::Value::Null,
                 }));
@@ -176,7 +176,7 @@ pub async fn update_monitor(
                     code: 409,
                     message: format!(
                         "监控名称已存在: {}（按target/类型生成，请先删除同名配置）",
-                        crate::tools_types::display_name(&entry)
+                        crate::domain::display_name(&entry)
                     ),
                     data: serde_json::Value::Null,
                 }));
@@ -283,7 +283,7 @@ pub async fn run_monitor_once(
     let name = row
         .name
         .clone()
-        .unwrap_or_else(|| crate::tools_types::display_name(&entry));
+        .unwrap_or_else(|| crate::domain::display_name(&entry));
     // 未配置interval时使用--interval默认值（与定时调度同源）
     let interval_default = Arc::unwrap_or_clone(default_interval.into_inner());
     let config = crate::monitor::types::MonitorConfig::from_entry(&entry, interval_default);
@@ -332,7 +332,7 @@ pub async fn run_monitor_once(
 mod tests {
     use super::{create_monitor, update_monitor};
     use crate::api::handles::response::DefaultResponseObj;
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use crate::database::services::monitor_service::MonitorService;
     use crate::scheduler::Scheduler;

@@ -2,7 +2,7 @@
 // 从 engine 抽出——这些是纯函数（输入检查结果，输出是否命中/消息），与状态机（防抖、
 // 抑制状态持久化）的变化原因不同：规则语义调整不碰状态机，状态机演进不碰规则判定。
 use crate::monitor::types::{CheckResult, CheckResultDetail};
-use crate::tools_types::{ContentVerificationRules, HttpMonitorResult, NotifyCondition};
+use crate::domain::{ContentVerificationRules, HttpMonitorResult, NotifyCondition};
 use regex::Regex;
 
 // 目标是否可用：任务执行失败、或各类型结果中的可达性标志为false 都视为不可用
@@ -139,7 +139,7 @@ pub(super) fn evaluate_threshold(
         // 结果类型与metric不匹配（如cpu规则配在HTTP监控上）：跳过而不是误判
         _ => return None,
     };
-    let hit = match crate::tools_types::CompareOp::parse(&th.op) {
+    let hit = match crate::domain::CompareOp::parse(&th.op) {
         Some(op) => op.apply(value, th.value),
         // 非法比较符直接跳过（API侧已校验，防御JSON直写数据库的场景）
         None => false,
@@ -219,7 +219,7 @@ mod tests {
     use crate::monitor::types::{
         CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
     };
-    use crate::tools_types::{
+    use crate::domain::{
         BasicAvailability, ContentVerificationRules, ContentVerificationRulesResult,
         ContentVerificationRulesSingle, HttpMonitorResult, MonitorType, NotifyCondition,
         ThresholdCondition,

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::response::{internal_error, DefaultResponseObj};
-use crate::database::connect_db::SqlitePool;
+use crate::database::pool::SqlitePool;
 use crate::database::models::CheckResultModel;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::database::services::monitor_service::MonitorService;
@@ -91,7 +91,7 @@ mod tests {
     use super::{get_console_status, MonitorStatusItem};
     use crate::api::handles::monitor_handlers::run_monitor_once;
     use crate::api::handles::response::DefaultResponseObj;
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::models::MonitorConfigInsert;
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use crate::database::repositories::result_repo::CheckResultRepository;

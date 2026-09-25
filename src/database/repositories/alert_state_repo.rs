@@ -1,4 +1,4 @@
-use crate::database::connect_db::{get_connection, SqlitePool};
+use crate::database::pool::{get_connection, SqlitePool};
 use crate::database::models::{AlertStateModel, AlertStateModelInsert};
 use crate::database::schema::alert_state;
 use diesel::prelude::*;
@@ -56,7 +56,7 @@ impl AlertStateRepository {
 #[cfg(test)]
 mod tests {
     use super::AlertStateRepository;
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::repositories::test_support::create_test_monitor;
     use std::sync::Arc;
 

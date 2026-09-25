@@ -2,7 +2,7 @@
 // MonitorConfig::from_entry：JSON配置项 → 运行时监控配置的唯一转换点
 // （此前住在main.rs，导致api/scheduler对crate root的逆向依赖）
 
-use crate::tools_types::{
+use crate::domain::{
     HttpBody, HttpBodyConfig, HttpMethodTypes, HttpMonitorResult, MonitorType,
     SelfDefineMonitorConfig,
 };
@@ -10,8 +10,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
-// 内容验证规则结构体，全局统一定义在 tools_types 中，这里直接重导出使用
-pub use crate::tools_types::ContentVerificationRulesSingle;
+// 内容验证规则结构体，全局统一定义在 types 中，这里直接重导出使用
+pub use crate::domain::ContentVerificationRulesSingle;
 
 // 定义核心的监控配置参数结构体
 #[derive(Debug, Clone)]
@@ -413,7 +413,7 @@ mod tests {
         CheckResult, CheckResultDetail, MonitorConfig, MonitorConfigDetail, MonitorType,
         UnknownMonitorResult,
     };
-    use crate::tools_types::{HttpBody, HttpMethodTypes, SelfDefineMonitorConfig};
+    use crate::domain::{HttpBody, HttpMethodTypes, SelfDefineMonitorConfig};
     use reqwest::header::{CONTENT_TYPE, HeaderValue};
 
     // 从JSON构造配置项（与API请求体/monitor_list.json的实际入参路径一致）
@@ -513,8 +513,8 @@ mod tests {
             monitor_type: MonitorType::Http,
             target: None,
             status: true,
-            details: CheckResultDetail::Http(crate::tools_types::HttpMonitorResult {
-                basic_available: crate::tools_types::BasicAvailability {
+            details: CheckResultDetail::Http(crate::domain::HttpMonitorResult {
+                basic_available: crate::domain::BasicAvailability {
                     is_reachable: false,
                     res_status_code: Some(500),
                     ..Default::default()

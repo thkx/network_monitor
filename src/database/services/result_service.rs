@@ -95,11 +95,11 @@ impl ResultService {
 #[cfg(test)]
 mod tests {
     use super::ResultService;
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::repositories::result_repo::CheckResultRepository;
     use crate::database::repositories::test_support::create_test_monitor;
     use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
-    use crate::tools_types::MonitorType;
+    use crate::domain::MonitorType;
     use std::sync::Arc;
 
     // build_insert是单条与批量共用的唯一构造点：验证check_id与完整结果详情

@@ -1,9 +1,9 @@
-use super::monitor_trait::Monitor;
+use super::Monitor;
 use super::types::{
     CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
     UnknownMonitorResult,
 };
-use crate::tools_types::{
+use crate::domain::{
     AdvancedAvailability, BasicAvailability, ContentVerificationResult,
     ContentVerificationRules, ContentVerificationRulesResult, ContentVerificationRulesSingle,
     HttpBody, HttpMethodTypes, HttpMonitorResult, MonitorType, PerformanceTimings, SecurityHeaders,
@@ -436,7 +436,7 @@ mod tests {
     use crate::monitor::types::{
         CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
     };
-    use crate::tools_types::{
+    use crate::domain::{
         ContentVerificationRules, ContentVerificationRulesSingle, HttpMethodTypes, MonitorType,
     };
 

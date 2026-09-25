@@ -1,4 +1,4 @@
-use crate::database::connect_db::{get_connection, SqlitePool};
+use crate::database::pool::{get_connection, SqlitePool};
 use crate::database::models::{CheckResultModel, CheckResultModelInsert};
 use crate::database::schema::check_result;
 use diesel::prelude::*;
@@ -140,7 +140,7 @@ impl CheckResultRepository {
 #[cfg(test)]
 mod tests {
     use super::{CheckResultModelInsert, CheckResultRepository};
-    use crate::database::connect_db::test_pool;
+    use crate::database::pool::test_pool;
     use crate::database::repositories::test_support::create_test_monitor;
     use std::sync::Arc;
 
