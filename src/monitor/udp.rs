@@ -1,6 +1,6 @@
 use super::Monitor;
-use crate::domain::{CheckResultDetail, MonitorConfig, UdpMonitorResult};
 use crate::domain::MonitorType;
+use crate::domain::{CheckResultDetail, MonitorConfig, UdpMonitorResult};
 use crate::tools::parse_host_port;
 use std::time::Instant;
 use tokio::net::UdpSocket;
@@ -167,10 +167,10 @@ mod tests {
     async fn udp_response_from_target_is_accepted() {
         use super::UdpMonitor;
         use crate::domain::MonitorType;
-        use crate::monitor::Monitor;
         use crate::domain::{
             CheckResultDetail, MonitorConfig, MonitorConfigDetail, UdpMonitorConfig,
         };
+        use crate::monitor::Monitor;
 
         // 回显服务器：收到任意包原样回发（非DNS端口，走"任意回包"语义）
         let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

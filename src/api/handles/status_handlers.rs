@@ -23,7 +23,7 @@ pub struct MonitorStatusItem {
     pub last_status: Option<i32>, // None=尚未执行过检查
     pub last_response_time: Option<i32>,
     pub last_check_at: Option<String>,
-    pub alerting: bool, // 是否处于"已告警未恢复"状态
+    pub alerting: bool,      // 是否处于"已告警未恢复"状态
     pub tag: Option<String>, // 分组标签（用于列表页筛选）
 }
 

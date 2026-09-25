@@ -18,11 +18,8 @@ mod tests {
     async fn healthz_returns_200_ok() {
         let app =
             test::init_service(App::new().route("/healthz", web::get().to(get_healthz))).await;
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::get().uri("/healthz").to_request(),
-        )
-        .await;
+        let resp =
+            test::call_service(&app, test::TestRequest::get().uri("/healthz").to_request()).await;
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["status"], "ok");

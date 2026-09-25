@@ -2,9 +2,7 @@
 // （从 monitor_handlers 抽出：校验规则独立演进，与 handler 编排逻辑解耦）
 use regex::Regex;
 
-use crate::domain::{
-    AlertRuleTypes, ContentVerificationRules, NotifyType, MonitorDefinition,
-};
+use crate::domain::{AlertRuleTypes, ContentVerificationRules, MonitorDefinition, NotifyType};
 
 // 创建/更新前的配置校验：非法配置返回400，避免脏配置入库
 pub fn validate_config(entry: &MonitorDefinition) -> Result<(), actix_web::Error> {

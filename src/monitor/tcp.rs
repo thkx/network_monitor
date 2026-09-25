@@ -1,6 +1,6 @@
 use super::Monitor;
-use crate::domain::{CheckResultDetail, MonitorConfig, TcpMonitorResult};
 use crate::domain::MonitorType;
+use crate::domain::{CheckResultDetail, MonitorConfig, TcpMonitorResult};
 use crate::tools::parse_host_port;
 use std::time::Instant;
 

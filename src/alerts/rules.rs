@@ -1,8 +1,8 @@
 // 告警规则的无状态评估函数：可用性判定、内容校验、阈值判定，以及消息文本构造。
 // 从 engine 抽出——这些是纯函数（输入检查结果，输出是否命中/消息），与状态机（防抖、
 // 抑制状态持久化）的变化原因不同：规则语义调整不碰状态机，状态机演进不碰规则判定。
-use crate::domain::{ContentVerificationRules, HttpMonitorResult, NotifyCondition};
 use crate::domain::{CheckResult, CheckResultDetail};
+use crate::domain::{ContentVerificationRules, HttpMonitorResult, NotifyCondition};
 use regex::Regex;
 
 // 目标是否可用：任务执行失败、或各类型结果中的可达性标志为false 都视为不可用

@@ -17,8 +17,8 @@ use crate::database::models::AlertHistoryInsert;
 use crate::database::pool::SqlitePool;
 use crate::database::repositories::alert_history_repo::AlertHistoryRepository;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
-use crate::domain::{AlertRuleTypes, AlertVerificationRules};
 use crate::domain::CheckResult;
+use crate::domain::{AlertRuleTypes, AlertVerificationRules};
 use std::sync::Arc;
 
 // 告警引擎：持有通知引擎、告警规则与抑制状态，对外提供统一的check入口

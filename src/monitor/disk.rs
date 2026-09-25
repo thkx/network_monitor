@@ -1,6 +1,6 @@
 use super::Monitor;
-use crate::domain::{CheckResultDetail, DiskInfo, DiskMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
+use crate::domain::{CheckResultDetail, DiskInfo, DiskMonitorResult, MonitorConfig};
 use sysinfo::Disks;
 
 pub struct DiskMonitor {}

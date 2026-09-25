@@ -50,7 +50,9 @@ pub async fn get_all_monitors(
 pub async fn get_monitor_tags(
     monitor_service: web::Data<MonitorService>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let tags = monitor_service.get_distinct_tags().map_err(internal_error)?;
+    let tags = monitor_service
+        .get_distinct_tags()
+        .map_err(internal_error)?;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "OK".to_string(),

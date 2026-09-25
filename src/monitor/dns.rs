@@ -1,6 +1,6 @@
 use super::Monitor;
-use crate::domain::{CheckResultDetail, DnsMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
+use crate::domain::{CheckResultDetail, DnsMonitorResult, MonitorConfig};
 use std::time::Instant;
 use trust_dns_resolver::TokioAsyncResolver;
 

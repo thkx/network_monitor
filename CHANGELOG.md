@@ -2,6 +2,27 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-09-25
+
+### Added
+- 告警历史 `alert_history` 表：告警触发/恢复各写一行（`state`=triggered/recovered），`GET /api/alerts` 游标分页查询 + 控制台告警入口，`alert_state` 只存当前抑制态
+- `GET /healthz` 存活探针（免认证，恒 200）
+- tag 分组标签：配置可带 `tag`，列表 `?tag=` 筛选、`GET /api/monitors/tags` 去重标签列表、控制台筛选下拉
+- HTTP 分段探测可配置 `collect_timings`（默认 true）：关闭时省去每次检查的额外 DNS/TCP/TLS 探测连接
+- `TlsConnector` 进程级 OnceLock 缓存（此前每次 HTTP 探测重建 TLS 连接器）
+- CSV 日志按日滚动（`monitor_log-YYYY-MM-DD.csv`）+ 常驻写句柄（此前每条记录 open/flush/close，文件无限增长）
+- TCP/FTP/DNS 探测超时对齐 `config.timeout`（此前硬编码 5s/3s），附超时生效回归测试
+- 启动失败（DB 连接失败/端口绑定失败）退出码改为 1，容器编排可感知（原 exit 0 静默退出）
+
+### Changed
+- `SelfDefineMonitorConfig` → `MonitorDefinition`（保留过渡别名，下版本移除）
+- RESPONSE_CODE 告警条件字段正名：`contains`→`deny_codes`、`no_contains`→`allowed_codes`（serde alias 兼容旧 JSON，旧配置无需迁移）
+- `monitor/types.rs` 并入 `domain/check.rs`（类型定义单一家园）；`UrlLogResult.url` → `monitor`（字段名与存值一致）
+- webhook 占位符字面量提为常量 `WEBHOOK_PLACEHOLDER`
+- reqwest 显式 `native-tls`：移除 0.13 起默认混入的 rustls(aws-lc-sys) 第二套 TLS 栈（本项目全线 native-tls；aws-lc-sys 的 C 构建也是 CI ubuntu 失败根因）
+- 全库 `cargo fmt` 补跑（修复重构后 import 排序漂移）；icmp Linux 分支手写整除改 `div_ceil`（`manual_div_ceil` lint）
+- 版本号与 README 同步至 0.4.0
+
 ## [0.3.0] - 2026-09-25
 
 ### Changed

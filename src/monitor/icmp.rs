@@ -1,6 +1,6 @@
 use super::Monitor;
-use crate::domain::{CheckResultDetail, IcmpMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
+use crate::domain::{CheckResultDetail, IcmpMonitorResult, MonitorConfig};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -83,7 +83,8 @@ impl Monitor for IcmpMonitor {
             "-c".into(),
             "1".into(),
             "-W".into(),
-            ((timeout_ms + 999) / 1000).to_string(),
+            // Linux -W 单位是秒，向上取整（div_ceil 而非 (x+999)/1000，避免 manual_div_ceil lint）
+            timeout_ms.div_ceil(1000).to_string(),
         ];
         // spawn + kill_on_drop + 外层tokio超时：超时取消future时子进程随之被kill
         // （此前output().await无兜底超时，ping异常挂起会让任务永久失明且无任何报错）

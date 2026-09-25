@@ -1,6 +1,6 @@
 use super::Monitor;
-use crate::domain::{CheckResultDetail, FtpMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
+use crate::domain::{CheckResultDetail, FtpMonitorResult, MonitorConfig};
 use crate::tools::parse_host_port;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,11 +39,8 @@ impl Monitor for FtpMonitor {
         // 连接与每步读取的超时对齐 config.timeout（毫秒；下限1秒防配置0立即超时）
         // 此前硬编码连接5秒/单次读3秒，配置的超时对FTP不生效
         let step_timeout = Duration::from_millis(config.timeout.max(1000));
-        let connect_res = tokio::time::timeout(
-            step_timeout,
-            TcpStream::connect((host.as_str(), port)),
-        )
-        .await;
+        let connect_res =
+            tokio::time::timeout(step_timeout, TcpStream::connect((host.as_str(), port))).await;
         if let Ok(Ok(mut stream)) = connect_res {
             result.connected = true;
             let mut buf = Vec::with_capacity(256);
@@ -69,7 +66,8 @@ impl Monitor for FtpMonitor {
                                 if send_cmd(&mut stream, "PASS ftp-monitor@example.com")
                                     .await
                                     .is_ok()
-                                    && let Ok(c2) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await
+                                    && let Ok(c2) =
+                                        read_ftp_reply(&mut stream, &mut buf, step_timeout).await
                                 {
                                     result.last_code = Some(c2);
                                     result.logged_in = (200..=299).contains(&c2);
@@ -160,8 +158,8 @@ fn parse_ftp_code(buf: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::{FtpMonitor, MonitorConfig, MonitorType, parse_ftp_code};
-    use crate::monitor::Monitor;
     use crate::domain::CheckResultDetail;
+    use crate::monitor::Monitor;
 
     #[test]
     fn ftp_reply_parser_handles_single_and_multiline() {
@@ -210,9 +208,7 @@ mod tests {
             interval: Some(60),
             monitor_type: MonitorType::Ftp,
             timeout: 5000,
-            details: crate::domain::MonitorConfigDetail::Ftp(
-                crate::domain::FtpMonitorConfig {},
-            ),
+            details: crate::domain::MonitorConfigDetail::Ftp(crate::domain::FtpMonitorConfig {}),
         }
     }
 

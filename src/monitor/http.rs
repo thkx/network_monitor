@@ -1,12 +1,12 @@
 use super::Monitor;
 use crate::domain::{
-    CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail, UnknownMonitorResult,
-};
-use crate::domain::{
     AdvancedAvailability, BasicAvailability, CertificateInfo, ContentVerificationResult,
     ContentVerificationRules, ContentVerificationRulesResult, ContentVerificationRulesSingle,
     HttpBody, HttpMethodTypes, HttpMonitorResult, MonitorType, PerformanceTimings, SecurityHeaders,
     StatusCategory, StatusInfo,
+};
+use crate::domain::{
+    CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail, UnknownMonitorResult,
 };
 use crate::tools::get_dns_tcp_tls_performance;
 use regex::Regex;
@@ -311,7 +311,10 @@ fn assemble_success(
         performance_timings,
         certificate_info: ssl_certificate_info.unwrap_or_default(),
         content_verification: create_content_verification_result(body, &detail.rules),
-        advanced_available: create_advanced_availability_result(body, &detail.business_metric_fields),
+        advanced_available: create_advanced_availability_result(
+            body,
+            &detail.business_metric_fields,
+        ),
         error_message: None,
         error_kind: None,
     }
@@ -446,13 +449,11 @@ impl Monitor for HttpMonitor {
 #[cfg(test)]
 mod tests {
     use super::{HttpMonitor, charset_from_content_type, extract_json_path};
+    use crate::domain::{CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail};
     use crate::domain::{
         ContentVerificationRules, ContentVerificationRulesSingle, HttpMethodTypes, MonitorType,
     };
     use crate::monitor::Monitor;
-    use crate::domain::{
-        CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
-    };
 
     // 本地假HTTP服务器：读完整请求头后再回响应（一次read只可能拿到分段报文的碎片，
     // 带着未读请求字节关连接会触发RST把客户端的body读取重置——webhook假服务器的同款教训）
@@ -741,7 +742,8 @@ mod tests {
 
     // 点路径提取：嵌套对象、数组下标、标量字符串化、缺失路径
     #[test]
-    fn json_path_extracts_nested_and_array_values() {        let json: serde_json::Value =
+    fn json_path_extracts_nested_and_array_values() {
+        let json: serde_json::Value =
             serde_json::from_str(r#"{"a":{"b":[10,{"c":"x"}]},"n":5,"s":"v"}"#).unwrap();
         assert_eq!(extract_json_path(&json, "n").as_deref(), Some("5"));
         assert_eq!(extract_json_path(&json, "s").as_deref(), Some("v"));

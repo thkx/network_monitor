@@ -12,9 +12,9 @@ use crate::async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
 use crate::database::models::MonitorConfigModel;
 use crate::database::pool::SqlitePool;
 use crate::database::services::monitor_service::MonitorService;
+use crate::domain::MonitorConfig;
 use crate::domain::{MonitorDefinition, display_name};
 use crate::monitor::MonitorFactory;
-use crate::domain::MonitorConfig;
 
 pub struct Scheduler {
     tasks: HashMap<i32, JoinHandle<()>>,
@@ -116,9 +116,9 @@ impl Scheduler {
         let monitor = MonitorFactory::create_monitor(config.monitor_type);
         // 告警引擎与任务同生命周期；抑制状态从 alert_state 表恢复：
         // 热更新重建任务后引擎不会"失忆"，故障未恢复就不会重复轰炸通知渠道
-        let engine = entry.alert_rules.map(|rules| {
-            AlertsEngine::with_state(rules, self.pool.clone(), row.id)
-        });
+        let engine = entry
+            .alert_rules
+            .map(|rules| AlertsEngine::with_state(rules, self.pool.clone(), row.id));
         let handle = AsyncMonitor::create_interval_monitoring(
             monitor,
             config,

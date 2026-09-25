@@ -85,7 +85,11 @@ mod tests {
         assert!(page2.iter().all(|r| r.id < cursor), "游标之前的记录");
         // 第三页应为空（共 4 条）
         let cursor2 = page2.last().unwrap().id;
-        assert!(repo.get_history(Some(mid), Some(cursor2), 2).unwrap().is_empty());
+        assert!(
+            repo.get_history(Some(mid), Some(cursor2), 2)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

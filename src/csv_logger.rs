@@ -17,7 +17,7 @@ pub struct UrlLogResult {
 
 // 常驻写句柄 + 当前所在日期：跨天时整体替换
 struct Inner {
-    date: String,      // 当前 writer 对应的日期 YYYY-MM-DD
+    date: String,         // 当前 writer 对应的日期 YYYY-MM-DD
     writer: Writer<File>, // 常驻写句柄（此前每条日志都 open+flush+close，改为句柄常驻）
 }
 
@@ -48,7 +48,9 @@ fn dated_path(base: &str, date: &str) -> String {
 fn open_dated(base: &str, date: &str) -> Result<Writer<File>, Box<dyn Error>> {
     let path = dated_path(base, date);
     // 文件不存在或长度为0都需要补表头（防止空文件缺表头）
-    let need_header = std::fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true);
+    let need_header = std::fs::metadata(&path)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
     let file = OpenOptions::new()
         .append(true) // 追加，不覆盖已有内容
         .create(true) // 不存在则创建
@@ -123,8 +125,14 @@ mod tests {
 
     #[test]
     fn dated_path_inserts_date_before_extension() {
-        assert_eq!(dated_path("monitor_log.csv", "2025-01-01"), "monitor_log-2025-01-01.csv");
-        assert_eq!(dated_path("logs/m.csv", "2025-01-01"), "logs/m-2025-01-01.csv");
+        assert_eq!(
+            dated_path("monitor_log.csv", "2025-01-01"),
+            "monitor_log-2025-01-01.csv"
+        );
+        assert_eq!(
+            dated_path("logs/m.csv", "2025-01-01"),
+            "logs/m-2025-01-01.csv"
+        );
         assert_eq!(dated_path("noext", "2025-01-01"), "noext-2025-01-01");
         // 目录含点、文件名无扩展名：不应把目录的点当扩展名
         assert_eq!(dated_path("a.b/log", "2025-01-01"), "a.b/log-2025-01-01");

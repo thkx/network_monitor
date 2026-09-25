@@ -190,7 +190,8 @@ mod tests {
         };
         repo.create_monitor(&with_tag("a", Some("prod"))).unwrap();
         repo.create_monitor(&with_tag("b", Some("prod"))).unwrap();
-        repo.create_monitor(&with_tag("c", Some("staging"))).unwrap();
+        repo.create_monitor(&with_tag("c", Some("staging")))
+            .unwrap();
         repo.create_monitor(&with_tag("d", None)).unwrap();
 
         // 按 tag 筛选
