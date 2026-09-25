@@ -144,7 +144,9 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
         Ok(pool) => pool,
         Err(e) => {
             tracing::error!("数据库连接失败: {}", e);
-            return;
+            // 非0退出：容器/编排器（systemd、k8s、compose restart:on-failure）据此重启。
+            // 此前仅 return，进程以 0 退出被误判为"正常结束"，不会触发重启。
+            std::process::exit(1);
         }
     };
     let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
@@ -246,7 +248,8 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
         Ok(srv) => srv.run(),
         Err(e) => {
             tracing::error!("Web API 端口 {} 绑定失败: {}", port, e);
-            return;
+            // 非0退出：端口被占用/权限不足属启动失败，编排器据此重启（见上方DB失败说明）。
+            std::process::exit(1);
         }
     };
     tracing::info!("Web API 已启动: http://127.0.0.1:{}/api/monitors", port);
