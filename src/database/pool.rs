@@ -61,9 +61,7 @@ pub async fn establish_database_connection() -> Result<Arc<SqlitePool>, Box<dyn 
 // "取连接失败"升级为进程级 panic（虽多被 spawn_blocking 圈住只毁单个 task，
 // 但热更新等同步上下文会静默失败）。用 diesel 的 QueryBuilderError 作为错误逃逸口，
 // 让全部仓库函数（均返回 diesel::result::Error）经 ? 统一走已有的错误降级路径
-pub fn get_connection(
-    pool: &SqlitePool,
-) -> Result<SqlitePooledConnection, diesel::result::Error> {
+pub fn get_connection(pool: &SqlitePool) -> Result<SqlitePooledConnection, diesel::result::Error> {
     let mut conn = pool.get().map_err(|e| {
         diesel::result::Error::QueryBuilderError(
             format!("从连接池获取连接失败（池耗尽或超时）: {e}").into(),
@@ -78,7 +76,10 @@ pub fn get_connection(
 // 测试辅助：在临时目录建库（自动跑迁移），测试结束随临时目录一起删除
 #[cfg(test)]
 pub fn test_pool(dir: &std::path::Path) -> SqlitePool {
-    let url = format!("file:///{}/test.db", dir.display().to_string().replace('\\', "/"));
+    let url = format!(
+        "file:///{}/test.db",
+        dir.display().to_string().replace('\\', "/")
+    );
     let manager = ConnectionManager::<SqliteConnection>::new(url);
     let pool = Pool::builder()
         .max_size(4)
@@ -112,13 +113,16 @@ mod tests {
 
     #[test]
     fn exhausted_pool_returns_err_not_panic() {
-        use diesel::r2d2::{ConnectionManager, Pool};
         use diesel::SqliteConnection;
+        use diesel::r2d2::{ConnectionManager, Pool};
         use std::time::Duration;
         // max_size=1 且把唯一连接握在手里：再取连接必然超时。
         // 断言返回 Err（而非旧实现的 expect panic），让调用方经 ? 走错误降级路径
         let dir = tempfile::tempdir().expect("临时目录创建失败");
-        let url = format!("file:///{}/x.db", dir.path().display().to_string().replace('\\', "/"));
+        let url = format!(
+            "file:///{}/x.db",
+            dir.path().display().to_string().replace('\\', "/")
+        );
         let manager = ConnectionManager::<SqliteConnection>::new(url);
         let pool = Pool::builder()
             .max_size(1)

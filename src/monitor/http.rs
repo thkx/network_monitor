@@ -1,19 +1,18 @@
 use super::Monitor;
 use super::types::{
-    CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
-    UnknownMonitorResult,
+    CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail, UnknownMonitorResult,
 };
 use crate::domain::{
-    AdvancedAvailability, BasicAvailability, ContentVerificationResult,
-    ContentVerificationRules, ContentVerificationRulesResult, ContentVerificationRulesSingle,
-    HttpBody, HttpMethodTypes, HttpMonitorResult, MonitorType, PerformanceTimings, SecurityHeaders,
-    StatusCategory, StatusInfo,
+    AdvancedAvailability, BasicAvailability, ContentVerificationResult, ContentVerificationRules,
+    ContentVerificationRulesResult, ContentVerificationRulesSingle, HttpBody, HttpMethodTypes,
+    HttpMonitorResult, MonitorType, PerformanceTimings, SecurityHeaders, StatusCategory,
+    StatusInfo,
 };
+use crate::tools::get_dns_tcp_tls_performance;
 use regex::Regex;
 use reqwest::Client;
-use crate::tools::get_dns_tcp_tls_performance;
 use std::collections::HashMap;
-use std::time::{ Duration, Instant };
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub struct HttpMonitor {
@@ -198,7 +197,7 @@ impl HttpMonitor {
                 ContentVerificationRules::Regex => match Regex::new(rule_content) {
                     Ok(regex) => regex.is_match(body),
                     Err(_) => false,
-                }
+                },
                 _ => false,
             };
             self.get_content_verify_result(
@@ -427,17 +426,15 @@ impl Monitor for HttpMonitor {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
-    use super::{charset_from_content_type, extract_json_path, HttpMonitor};
+    use super::{HttpMonitor, charset_from_content_type, extract_json_path};
+    use crate::domain::{
+        ContentVerificationRules, ContentVerificationRulesSingle, HttpMethodTypes, MonitorType,
+    };
     use crate::monitor::Monitor;
     use crate::monitor::types::{
         CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
-    };
-    use crate::domain::{
-        ContentVerificationRules, ContentVerificationRulesSingle, HttpMethodTypes, MonitorType,
     };
 
     // 本地假HTTP服务器：读完整请求头后再回响应（一次read只可能拿到分段报文的碎片，
@@ -512,7 +509,11 @@ mod tests {
     async fn reachable_200_with_matching_content_rule() {
         let addr = spawn_fake_http(canned_200("text/plain", "hello world"));
         let (status, detail) = HttpMonitor::new()
-            .check(&http_config(addr, vec![rule(ContentVerificationRules::Contains, "hello")], vec![]))
+            .check(&http_config(
+                addr,
+                vec![rule(ContentVerificationRules::Contains, "hello")],
+                vec![],
+            ))
             .await;
         assert!(status);
         let CheckResultDetail::Http(r) = detail else {
@@ -529,7 +530,11 @@ mod tests {
     async fn failed_content_rules_are_recorded() {
         let addr = spawn_fake_http(canned_200("text/plain", "hello world"));
         let (_, detail) = HttpMonitor::new()
-            .check(&http_config(addr, vec![rule(ContentVerificationRules::NotContains, "hello")], vec![]))
+            .check(&http_config(
+                addr,
+                vec![rule(ContentVerificationRules::NotContains, "hello")],
+                vec![],
+            ))
             .await;
         let CheckResultDetail::Http(r) = detail else {
             panic!("应为HTTP结果");
@@ -554,14 +559,24 @@ mod tests {
             panic!("应为HTTP结果");
         };
         assert_eq!(
-            r.advanced_available.business_metrics.get("code").map(String::as_str),
+            r.advanced_available
+                .business_metrics
+                .get("code")
+                .map(String::as_str),
             Some("0")
         );
         assert_eq!(
-            r.advanced_available.business_metrics.get("data.queue").map(String::as_str),
+            r.advanced_available
+                .business_metrics
+                .get("data.queue")
+                .map(String::as_str),
             Some("42")
         );
-        assert!(!r.advanced_available.business_metrics.contains_key("missing.path"));
+        assert!(
+            !r.advanced_available
+                .business_metrics
+                .contains_key("missing.path")
+        );
     }
 
     // 连接失败：任务执行成功但目标不可达，错误被分类并携带原因

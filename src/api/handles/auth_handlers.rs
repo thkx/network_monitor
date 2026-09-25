@@ -2,12 +2,12 @@
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::Deserialize;
 
 use crate::auth::{
-    build_expired_cookie, build_session_cookie, AuthConfig, LoginOutcome, SessionStore,
-    SESSION_COOKIE,
+    AuthConfig, LoginOutcome, SESSION_COOKIE, SessionStore, build_expired_cookie,
+    build_session_cookie,
 };
 
 #[derive(Debug, Deserialize)]
@@ -33,10 +33,11 @@ pub async fn login(
     // 原子登录：限流检查、凭证验证、失败计数/会话创建在同一次加锁内完成。
     // 旧实现"先检查后记录"分两次加锁，锁间隙不计数，并发突发可在任何失败
     // 被记录前全部通过检查，5次上限被放大；合并后各请求串行判定，上限精确生效
-    let outcome = store
-        .lock()
-        .expect("session锁中毒")
-        .login(ip, &config, &body.username, &body.password);
+    let outcome =
+        store
+            .lock()
+            .expect("session锁中毒")
+            .login(ip, &config, &body.username, &body.password);
     match outcome {
         LoginOutcome::Locked => HttpResponse::TooManyRequests().json(serde_json::json!({
             "code": 429,
@@ -53,13 +54,11 @@ pub async fn login(
             tracing::info!("登录成功 (user={:?}, ip={:?})", body.username, ip);
             HttpResponse::Ok()
                 .cookie(build_session_cookie(&sid, config.cookie_secure))
-                .json(
-                    serde_json::json!({
-                        "code": 200,
-                        "message": "OK",
-                        "data": { "username": body.username },
-                    }),
-                )
+                .json(serde_json::json!({
+                    "code": 200,
+                    "message": "OK",
+                    "data": { "username": body.username },
+                }))
         }
     }
 }

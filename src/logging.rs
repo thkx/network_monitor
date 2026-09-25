@@ -1,11 +1,11 @@
 // 日志初始化模块：tracing 双通道输出（控制台 + 按日滚动文件 logs/network_monitor.log）
 // 级别通过 RUST_LOG 环境变量控制，缺省 info，且 hyper/reqwest 静音到 warn 防止HTTP库刷屏
 
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 // 本地时间戳格式化器（复用已有chrono依赖，避免为此引入time crate）
 struct LocalTimer;

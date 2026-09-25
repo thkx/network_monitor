@@ -14,12 +14,12 @@ use super::rules::{
     is_target_available,
 };
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
-use crate::monitor::types::CheckResult;
 use crate::domain::{AlertRuleTypes, AlertVerificationRules};
+use crate::monitor::types::CheckResult;
 
 // 告警引擎：持有通知引擎、告警规则与抑制状态，对外提供统一的check入口
 pub struct AlertsEngine {
-    notify: Box<dyn AlertSender>,        // 通知引擎（trait对象：测试可注入stub）
+    notify: Box<dyn AlertSender>, // 通知引擎（trait对象：测试可注入stub）
     alert_rules: AlertVerificationRules, // 告警规则配置
     // 告警抑制状态：是否处于"已告警、未恢复"状态（防止同一故障反复轰炸通知渠道）
     alerting: bool,
@@ -193,16 +193,16 @@ impl AlertsEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::AlertsEngine;
     use super::super::notify::{AlertSender, SendOutcome};
-    use crate::monitor::types::{
-        CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
-        MemoryMonitorResult,
-    };
+    use super::AlertsEngine;
     use crate::domain::{
         AlertRuleTypes, AlertSingleRule, AlertVerificationRules, BasicAvailability,
         ContentVerificationRules, HttpMonitorResult, MonitorType, NotifyCondition,
         ThresholdCondition,
+    };
+    use crate::monitor::types::{
+        CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
+        MemoryMonitorResult,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -255,7 +255,11 @@ mod tests {
         }
     }
 
-    fn rules_cfg(rules: Vec<AlertSingleRule>, failures: Option<u32>, successes: Option<u32>) -> AlertVerificationRules {
+    fn rules_cfg(
+        rules: Vec<AlertSingleRule>,
+        failures: Option<u32>,
+        successes: Option<u32>,
+    ) -> AlertVerificationRules {
         AlertVerificationRules {
             notify_type: "FEISHU".to_string(),
             notify_config: crate::domain::NotifyConfig {
@@ -275,7 +279,10 @@ mod tests {
         failures: Option<u32>,
         successes: Option<u32>,
     ) -> AlertsEngine {
-        AlertsEngine::with_sender(rules_cfg(rules, failures, successes), Box::new(StubSender::delivered()))
+        AlertsEngine::with_sender(
+            rules_cfg(rules, failures, successes),
+            Box::new(StubSender::delivered()),
+        )
     }
 
     fn engine_with_rules(rules: Vec<AlertSingleRule>) -> AlertsEngine {
@@ -338,9 +345,11 @@ mod tests {
     #[test]
     fn availability_rule_silent_when_reachable() {
         let engine = engine_with_rules(vec![availability_rule()]);
-        assert!(engine
-            .evaluate(&http_result(true, true, Some(200)))
-            .is_none());
+        assert!(
+            engine
+                .evaluate(&http_result(true, true, Some(200)))
+                .is_none()
+        );
     }
 
     // 注：任务失败(status=false)判为不可用、ICMP 不可达判为不可用，这两条纯规则
@@ -357,10 +366,16 @@ mod tests {
     #[test]
     fn response_code_rule_matches_no_contains() {
         let engine = engine_with_rules(vec![response_code_rule(vec![200, 301])]);
-        assert!(engine.evaluate(&http_result(true, true, Some(500))).is_some());
-        assert!(engine
-            .evaluate(&http_result(true, true, Some(200)))
-            .is_none());
+        assert!(
+            engine
+                .evaluate(&http_result(true, true, Some(500)))
+                .is_some()
+        );
+        assert!(
+            engine
+                .evaluate(&http_result(true, true, Some(200)))
+                .is_none()
+        );
     }
 
     #[test]
@@ -398,39 +413,29 @@ mod tests {
             details: CheckResultDetail::Cpu(Default::default()),
         };
         // 系统资源类监控能执行即视为可用：AVAILABILITY 规则不触发
-        assert!(engine_with_rules(vec![availability_rule()])
-            .evaluate(&result)
-            .is_none());
+        assert!(
+            engine_with_rules(vec![availability_rule()])
+                .evaluate(&result)
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn default_threshold_alerts_immediately() {
         // 缺省（未配置防抖）：首次命中即告警，保持旧行为
         let mut engine = engine_with_rules(vec![availability_rule()]);
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(engine.alerting);
     }
 
     #[tokio::test]
     async fn debounce_requires_consecutive_failures() {
         let mut engine = engine_with_rules_cfg(vec![availability_rule()], Some(3), None);
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(!engine.alerting, "第1次命中未达阈值");
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(!engine.alerting, "第2次命中仍未达阈值");
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(engine.alerting, "第3次命中应触发告警");
     }
 
@@ -461,10 +466,7 @@ mod tests {
         // 状态反复抖动时，hit/ok连续计数不断被清零，永远达不到阈值
         let mut engine = engine_with_rules_cfg(vec![availability_rule()], Some(2), Some(2));
         for _ in 0..4 {
-            engine
-                .check(&http_result(true, false, None))
-                .await
-                .unwrap();
+            engine.check(&http_result(true, false, None)).await.unwrap();
             engine
                 .check(&http_result(true, true, Some(200)))
                 .await
@@ -492,15 +494,9 @@ mod tests {
             rules_cfg(vec![availability_rule()], Some(1), None),
             Box::new(StubSender::deferred()),
         );
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(!engine.alerting, "首发失败不应置位抑制状态");
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(!engine.alerting, "仍未成功，保持未告警态（下一轮会重发）");
     }
 
@@ -512,23 +508,14 @@ mod tests {
             rules_cfg(vec![availability_rule()], Some(1), None),
             Box::new(SharedStub(shared.clone())),
         );
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(!engine.alerting, "首发失败保持未告警态");
         // 渠道恢复：下一轮命中重发成功，置位抑制状态
         shared.set_delivered(true);
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(engine.alerting, "重发成功后应置位抑制状态");
         // 后续命中被抑制，不重复发送
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(engine.alerting);
     }
 
@@ -540,10 +527,7 @@ mod tests {
             rules_cfg(vec![availability_rule()], Some(1), Some(1)),
             Box::new(SharedStub(shared.clone())),
         );
-        engine
-            .check(&http_result(true, false, None))
-            .await
-            .unwrap();
+        engine.check(&http_result(true, false, None)).await.unwrap();
         assert!(engine.alerting, "首发成功应置位告警态");
         // 切换为首发失败：恢复通知发不出去，应保持告警态
         shared.set_delivered(false);
@@ -567,7 +551,10 @@ mod tests {
         let msg = engine.evaluate(&cpu_result(93.2)).expect("越限应命中告警");
         assert!(msg.contains("cpu > 80"));
         assert!(msg.contains("93.2"));
-        assert!(engine.evaluate(&cpu_result(50.0)).is_none(), "未越限不应告警");
+        assert!(
+            engine.evaluate(&cpu_result(50.0)).is_none(),
+            "未越限不应告警"
+        );
     }
 
     #[test]
@@ -640,7 +627,10 @@ mod tests {
     // 别名避免直接依赖crate::domain的完整路径（ContentVerificationRulesResult）
     type ContentVerificationRulesResultAlias = crate::domain::ContentVerificationRulesResult;
 
-    fn failed_rule(kind: ContentVerificationRules, content: &str) -> ContentVerificationRulesResultAlias {
+    fn failed_rule(
+        kind: ContentVerificationRules,
+        content: &str,
+    ) -> ContentVerificationRulesResultAlias {
         ContentVerificationRulesResultAlias {
             rules: crate::domain::ContentVerificationRulesSingle {
                 rule_type: kind,
@@ -662,7 +652,10 @@ mod tests {
             "expected-text",
         )]);
         let msg = engine.evaluate(&result).expect("内容校验失败应告警");
-        assert!(msg.contains("contains(expected-text)"), "消息应含规则明细: {msg}");
+        assert!(
+            msg.contains("contains(expected-text)"),
+            "消息应含规则明细: {msg}"
+        );
         assert!(msg.contains("内容校验失败 1 项"));
     }
 
@@ -673,7 +666,11 @@ mod tests {
             condition: NotifyCondition::default(),
         }]);
         // 无失败规则（含完全通过或未配置内容规则两种情形）都应静默
-        assert!(engine.evaluate(&http_result(true, true, Some(200))).is_none());
+        assert!(
+            engine
+                .evaluate(&http_result(true, true, Some(200)))
+                .is_none()
+        );
     }
 
     #[test]

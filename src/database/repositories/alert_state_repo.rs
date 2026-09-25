@@ -1,5 +1,5 @@
-use crate::database::pool::{get_connection, SqlitePool};
 use crate::database::models::{AlertStateModel, AlertStateModelInsert};
+use crate::database::pool::{SqlitePool, get_connection};
 use crate::database::schema::alert_state;
 use diesel::prelude::*;
 use std::sync::Arc;
@@ -37,7 +37,11 @@ impl AlertStateRepository {
     }
 
     // 保存抑制状态（upsert：不存在则插入，存在则更新）
-    pub fn set_alerting(&self, monitor_id: i32, alerting: bool) -> Result<(), diesel::result::Error> {
+    pub fn set_alerting(
+        &self,
+        monitor_id: i32,
+        alerting: bool,
+    ) -> Result<(), diesel::result::Error> {
         let mut conn = get_connection(&self.pool)?;
         let alerting_v = if alerting { 1 } else { 0 };
         diesel::insert_into(alert_state::table)

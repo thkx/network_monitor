@@ -7,10 +7,8 @@
 
 use crate::domain::EmailNotifyConfig;
 use lettre::{
-    message::header::ContentType,
-    message::Mailbox,
-    transport::smtp::authentication::Credentials,
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::Mailbox,
+    message::header::ContentType, transport::smtp::authentication::Credentials,
 };
 
 // 目标主机是否为loopback（本机）：明文认证到本机relay是安全的，凭证不出网卡。
@@ -74,10 +72,7 @@ pub async fn send_mail(cfg: &EmailNotifyConfig, subject: &str, body: &str) -> Re
     let builder = if cfg.password.is_empty() {
         builder
     } else {
-        builder.credentials(Credentials::new(
-            cfg.username.clone(),
-            cfg.password.clone(),
-        ))
+        builder.credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
     };
     let transporter: AsyncSmtpTransport<Tokio1Executor> = builder.build();
     transporter
@@ -93,7 +88,10 @@ mod tests {
     use crate::domain::EmailNotifyConfig;
 
     // 本地假SMTP服务器：按脚本逐行回响应，收集收到的命令行供断言
-    fn spawn_fake_smtp() -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    fn spawn_fake_smtp() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let transcript = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -155,7 +153,10 @@ mod tests {
             username: "monitor@example.com".to_string(),
             password: "auth-code".to_string(),
             from: Some("monitor@example.com".to_string()),
-            to: vec!["ops@example.com".to_string(), "boss@example.com".to_string()],
+            to: vec![
+                "ops@example.com".to_string(),
+                "boss@example.com".to_string(),
+            ],
         }
     }
 
@@ -178,10 +179,7 @@ mod tests {
             "多收件人逐个RCPT: {t}"
         );
         assert!(t.contains("Subject: "), "应有主题头: {t}");
-        assert!(
-            t.contains("CPU usage 95.0%"),
-            "ASCII正文应可还原: {t}"
-        );
+        assert!(t.contains("CPU usage 95.0%"), "ASCII正文应可还原: {t}");
     }
 
     // 免认证relay场景：password为空不应出现AUTH命令
@@ -216,7 +214,9 @@ mod tests {
             from: None,
             to: vec!["ops@example.com".to_string()],
         };
-        let err = send_mail(&cfg, "t", "b").await.expect_err("明文发凭证到远端应拒绝");
+        let err = send_mail(&cfg, "t", "b")
+            .await
+            .expect_err("明文发凭证到远端应拒绝");
         assert!(err.contains("明文"), "错误应指明明文风险: {err}");
     }
 
@@ -226,7 +226,9 @@ mod tests {
         // 假SMTP绑定在127.0.0.1，端口非465/587即明文；带密码也应走通
         let (addr, transcript) = spawn_fake_smtp();
         let cfg = email_cfg(addr.port()); // smtp_host=127.0.0.1, password非空
-        send_mail(&cfg, "t", "b").await.expect("本机明文relay应放行");
+        send_mail(&cfg, "t", "b")
+            .await
+            .expect("本机明文relay应放行");
         let t = transcript.lock().unwrap().join("\n");
         assert!(t.contains("AUTH"), "本机relay带密码应认证: {t}");
     }

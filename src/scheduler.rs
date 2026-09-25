@@ -9,13 +9,13 @@ use tokio::task::JoinHandle;
 
 use crate::alerts::AlertsEngine;
 use crate::async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
-use crate::database::pool::SqlitePool;
 use crate::database::models::MonitorConfigModel;
+use crate::database::pool::SqlitePool;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::database::services::monitor_service::MonitorService;
+use crate::domain::{SelfDefineMonitorConfig, display_name};
 use crate::monitor::MonitorFactory;
 use crate::monitor::types::MonitorConfig;
-use crate::domain::{SelfDefineMonitorConfig, display_name};
 
 pub struct Scheduler {
     tasks: HashMap<i32, JoinHandle<()>>,
@@ -141,8 +141,8 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::Scheduler;
-    use crate::database::pool::test_pool;
     use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
+    use crate::database::pool::test_pool;
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use crate::database::services::monitor_service::MonitorService;
     use std::sync::Arc;
@@ -198,7 +198,11 @@ mod tests {
         let mut scheduler = Scheduler::new(pool.clone(), 5);
         scheduler.set_sender(tx);
         scheduler.reload_all(&service);
-        assert_eq!(scheduler.active_task_count(), 2, "两个启用配置应各起一个任务");
+        assert_eq!(
+            scheduler.active_task_count(),
+            2,
+            "两个启用配置应各起一个任务"
+        );
 
         // 任务真实运行：interval首tick立即触发，应收到带monitor_id的CPU检查结果
         let msg = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())

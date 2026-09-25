@@ -1,4 +1,3 @@
-
 /// 默认的重试策略：200ms起步、5s封顶、最多重试3次（供数据库连接等场景复用）
 pub fn default_retry_policy() -> backon::ExponentialBuilder {
     backon::ExponentialBuilder::default()

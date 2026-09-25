@@ -81,9 +81,10 @@ impl Monitor for TracerouteMonitor {
                     continue;
                 }
                 if let Some(first) = trimmed.chars().next()
-                    && first.is_ascii_digit() {
-                        hops.push(trimmed.to_string());
-                    }
+                    && first.is_ascii_digit()
+                {
+                    hops.push(trimmed.to_string());
+                }
             }
             // 至少追踪到一个跃点即视为成功
             success = !hops.is_empty();

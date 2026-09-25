@@ -18,10 +18,9 @@ impl Monitor for UnknownMonitor {
         // 正常路径下配置详情就是Unknown，直接复用其description；
         // 若配置详情与监控引擎不匹配（异常路径），给出明确的排查提示
         let description = match &config.details {
-            MonitorConfigDetail::Unknown(u) => format!(
-                "{}（monitor_type: {}）",
-                u.description, config.monitor_type
-            ),
+            MonitorConfigDetail::Unknown(u) => {
+                format!("{}（monitor_type: {}）", u.description, config.monitor_type)
+            }
             _ => "监控类型与配置详情不匹配，请检查配置中的monitor_type".to_string(),
         };
         (

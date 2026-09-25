@@ -95,10 +95,12 @@ impl Monitor for IcmpMonitor {
             .kill_on_drop(true)
             .spawn();
         let output = match spawned {
-            Ok(child) => tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
-                .await
-                .ok()
-                .and_then(|r| r.ok()),
+            Ok(child) => {
+                tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+            }
             Err(_) => None, // ping命令不存在等启动失败：按不可用处理
         };
         let elapsed_ms = start.elapsed().as_millis();

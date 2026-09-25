@@ -19,7 +19,7 @@ pub struct MonitorConfig {
     pub target: Option<String>,       // 监控的目标URL或IP地址
     pub interval: Option<u64>,        // 监控间隔，单位秒
     pub monitor_type: MonitorType,    // 监控类型 HTTP TCP FTP等等
-    pub timeout: u64,                 // 检查超时时间，单位毫秒（此前只在HTTP详情里，命令类监控拿不到）
+    pub timeout: u64, // 检查超时时间，单位毫秒（此前只在HTTP详情里，命令类监控拿不到）
     pub details: MonitorConfigDetail, // 这里的话是不同监控类型的具体参数，跟公共的一些参数区分开 详见14行代码声明
 }
 
@@ -216,7 +216,7 @@ pub struct HttpMonitorConfig {
     pub headers: Option<HeaderMap<HeaderValue>>,            // 可选的请求URL需要的HTTP头
     pub body: Option<HttpBody>,                             // 可选的请求URL需要的body体
     pub rules: Option<Vec<ContentVerificationRulesSingle>>, // 可配置的监控规则
-    pub business_metric_fields: Vec<String>,                // 业务指标提取字段（JSON点路径），空=不提取
+    pub business_metric_fields: Vec<String>, // 业务指标提取字段（JSON点路径），空=不提取
 }
 
 // 其中监控的规则的话我们来简单实现了一下
@@ -288,8 +288,8 @@ pub enum CheckResultDetail {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FtpMonitorResult {
-    pub connected: bool,           // TCP连接是否成功
-    pub banner: Option<String>,    // 服务端返回的欢迎横幅信息
+    pub connected: bool,        // TCP连接是否成功
+    pub banner: Option<String>, // 服务端返回的欢迎横幅信息
     // FTP协议握手是否完成：横幅+USER命令均收到合法的三位响应码。
     // 认证被拒（如530）也算握手完成——服务在正常讲FTP；仅吐banner或
     // 回应非协议内容的"恰好开了21端口的TCP服务"为false
@@ -359,7 +359,7 @@ pub struct ProcessBrief {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct IcmpMonitorResult {
-    pub is_alive: bool,   // 目标主机是否存活
+    pub is_alive: bool, // 目标主机是否存活
     // 探测总耗时（墙钟），单位毫秒：含子进程 fork/exec、ping 自身 DNS 解析等开销，
     // 不等于链路延迟。真实链路 RTT 见 rtt_ms（从 ping 输出解析，可能取不到）
     pub elapsed_ms: u128,

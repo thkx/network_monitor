@@ -1,13 +1,13 @@
+pub mod alert_state_repo;
 pub mod monitor_repo;
 pub mod result_repo;
-pub mod alert_state_repo;
 
 // 测试公共设施：建一条监控父行
 // （check_result/alert_state 的 monitor_id 外键指向 monitor_config，测试需先建父行）
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::database::pool::SqlitePool;
     use crate::database::models::MonitorConfigInsert;
+    use crate::database::pool::SqlitePool;
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use std::sync::Arc;
 

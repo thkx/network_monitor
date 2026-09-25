@@ -8,7 +8,6 @@ use native_tls::TlsConnector;
 use tokio_native_tls::TlsConnector as TokioTlsConnector;
 use x509_parser::prelude::*;
 
-
 // 单独定义一个获取TCP、DNS、TLS的函数
 
 //定义一个函数返回类型为一个元组即可
@@ -80,42 +79,40 @@ pub async fn get_dns_tcp_tls_performance(
                 tls_min_time = tls_min_time.map_or(Some(ms), |min| Some(min.min(ms)));
                 // 检测证书有效性可以在这里进行
                 if ssl_certificate_info.is_none()
-                    && let Some(cert) = _tls_stream.get_ref().peer_certificate()? {
-                        let cert_der = cert.to_der()?;
-                        // from_der 返回 nom::IResult，需要手动 map_err
-                        let (_, x509_cert) = X509Certificate::from_der(&cert_der).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("x509 parse error: {e}"),
-                            )
-                        })?;
+                    && let Some(cert) = _tls_stream.get_ref().peer_certificate()?
+                {
+                    let cert_der = cert.to_der()?;
+                    // from_der 返回 nom::IResult，需要手动 map_err
+                    let (_, x509_cert) = X509Certificate::from_der(&cert_der).map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("x509 parse error: {e}"))
+                    })?;
 
-                        let validity = x509_cert.validity();
-                        let now = std::time::SystemTime::now();
-                        let not_before = validity.not_before.to_datetime();
-                        let not_after = validity.not_after.to_datetime();
-                        let days_until_expiry = (not_after - now).whole_days();
-                        // 这里的话需要查看相关的API文档来获取相关的库的信息
-                        let info = CertificateInfo {
-                            issuer: Some(x509_cert.issuer().to_string()),
-                            subject: Some(x509_cert.subject().to_string()),
-                            valid_from: Some(not_before.to_string()),
-                            valid_until: Some(not_after.to_string()),
-                            serial_number: Some(x509_cert.tbs_certificate.serial.to_string()),
-                            signature_algorithm: Some(
-                                x509_cert.signature_algorithm.algorithm.to_string(),
-                            ),
-                            public_key_algorithm: Some(format!(
-                                "{:?}",
-                                x509_cert.public_key().algorithm
-                            )),
-                            public_key_size: Some(
-                                x509_cert.public_key().subject_public_key.data.len() * 8,
-                            ), // 转换为比特
-                            is_valid: days_until_expiry > 0,
-                        };
-                        ssl_certificate_info = Some(info);
-                    }
+                    let validity = x509_cert.validity();
+                    let now = std::time::SystemTime::now();
+                    let not_before = validity.not_before.to_datetime();
+                    let not_after = validity.not_after.to_datetime();
+                    let days_until_expiry = (not_after - now).whole_days();
+                    // 这里的话需要查看相关的API文档来获取相关的库的信息
+                    let info = CertificateInfo {
+                        issuer: Some(x509_cert.issuer().to_string()),
+                        subject: Some(x509_cert.subject().to_string()),
+                        valid_from: Some(not_before.to_string()),
+                        valid_until: Some(not_after.to_string()),
+                        serial_number: Some(x509_cert.tbs_certificate.serial.to_string()),
+                        signature_algorithm: Some(
+                            x509_cert.signature_algorithm.algorithm.to_string(),
+                        ),
+                        public_key_algorithm: Some(format!(
+                            "{:?}",
+                            x509_cert.public_key().algorithm
+                        )),
+                        public_key_size: Some(
+                            x509_cert.public_key().subject_public_key.data.len() * 8,
+                        ), // 转换为比特
+                        is_valid: days_until_expiry > 0,
+                    };
+                    ssl_certificate_info = Some(info);
+                }
             }
         }
     }

@@ -165,7 +165,10 @@ mod tests {
         for (fields, expect_ok) in [
             (r#""consecutive_failures":0"#, false),
             (r#""consecutive_successes":1001"#, false),
-            (r#""consecutive_failures":3,"consecutive_successes":2"#, true),
+            (
+                r#""consecutive_failures":3,"consecutive_successes":2"#,
+                true,
+            ),
         ] {
             let entry = entry_from_json(&format!(
                 r#"{{"target":"https://a.com","monitor_type":"HTTP","alert_rules":{{"notify_type":"FEISHU","notify_config":{{"webhook_url":"http://x"}},"rules":[],{fields}}}}}"#

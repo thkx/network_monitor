@@ -44,10 +44,7 @@ impl ResultService {
     }
 
     // 领域写入口（批量）：消费者攒批场景，多行INSERT单语句落库
-    pub fn persist_checks_batch(
-        &self,
-        results: &[(i32, &CheckResult)],
-    ) -> Result<usize, Error> {
+    pub fn persist_checks_batch(&self, results: &[(i32, &CheckResult)]) -> Result<usize, Error> {
         let inserts: Vec<CheckResultModelInsert> = results
             .iter()
             .map(|(monitor_id, result)| Self::build_insert(*monitor_id, result))
@@ -98,8 +95,8 @@ mod tests {
     use crate::database::pool::test_pool;
     use crate::database::repositories::result_repo::CheckResultRepository;
     use crate::database::repositories::test_support::create_test_monitor;
-    use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
     use crate::domain::MonitorType;
+    use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
     use std::sync::Arc;
 
     // build_insert是单条与批量共用的唯一构造点：验证check_id与完整结果详情
@@ -126,13 +123,20 @@ mod tests {
 
         let (list, total) = service.get_check_results(Some(monitor_id), 1, 10).unwrap();
         assert_eq!(total, 1);
-        let metadata = list[0].metadata_json.as_deref().expect("metadata_json应存在");
-        let v: serde_json::Value = serde_json::from_str(metadata).expect("metadata_json应为合法JSON");
+        let metadata = list[0]
+            .metadata_json
+            .as_deref()
+            .expect("metadata_json应存在");
+        let v: serde_json::Value =
+            serde_json::from_str(metadata).expect("metadata_json应为合法JSON");
         // check_id为16进制（与CSV日志关联）
         assert_eq!(v["check_id"], "deadbeef");
         // details为序列化的CheckResultDetail（外标签枚举：{"Icmp":{...}}），完整可回查
         let details = v["details"].as_object().expect("details应为JSON对象");
-        assert!(details.contains_key("Icmp"), "details应保留类型标签: {details:?}");
+        assert!(
+            details.contains_key("Icmp"),
+            "details应保留类型标签: {details:?}"
+        );
         assert_eq!(details["Icmp"]["elapsed_ms"], 42);
     }
 

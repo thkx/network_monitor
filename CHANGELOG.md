@@ -2,6 +2,18 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-09-25
+
+### Changed
+- 全局类型模块重构：`tools_types.rs` 按关注点拆分为 `domain/` 门面（result 结果 / config 输入配置 / alert 告警通知三个子模块），全库引用同步
+- 模块文件名去冗余后缀：12 个监控引擎 `*_monitor.rs` → `monitor/*.rs`，工具 `*_tool.rs` → `tools/*.rs`，`connect_db.rs` → `database/pool.rs`
+- 阈值比较符集中为 `CompareOp` 枚举（`parse`/`Display`），消除散落的字符串字面量 match
+- 全库 `cargo fmt` 统一格式（import 排序、注释对齐、换行）；新增 `.gitattributes` 固定 LF 换行
+- 版本号与 README 同步至 0.3.0
+
+### Fixed
+- 补齐 0.2.0 已宣称但仓库中缺失的 GitHub Actions：CI（双平台 test + clippy 0 警告门槛 + fmt 检查）与 Release（`v*` tag 触发双平台二进制 + GHCR 镜像）
+
 ## [0.2.0] - 2026-09-17
 
 ### Added

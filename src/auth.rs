@@ -11,13 +11,13 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use actix_web::HttpResponse;
 use actix_web::cookie::time::Duration as CookieDuration;
 use actix_web::cookie::{Cookie, SameSite};
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::http::Method;
-use actix_web::HttpResponse;
 use sha2::{Digest, Sha256};
-use std::future::{ready, Ready};
+use std::future::{Ready, ready};
 use subtle::ConstantTimeEq;
 
 // 本地 boxed future别名：actix-web worker是单线程运行时，!Send future可用
@@ -235,7 +235,15 @@ impl Auth {
         }
         // 其余：会话cookie
         match req.cookie(SESSION_COOKIE) {
-            Some(c) if self.store.lock().expect("session锁中毒").validate(c.value()) => None,
+            Some(c)
+                if self
+                    .store
+                    .lock()
+                    .expect("session锁中毒")
+                    .validate(c.value()) =>
+            {
+                None
+            }
             _ => Some(unauthorized_response()),
         }
     }
@@ -339,8 +347,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Auth, AuthConfig, LoginOutcome, SessionStore, SESSION_COOKIE, ATTEMPT_IDLE_SECS,
-        MAX_TRACKED_IPS,
+        ATTEMPT_IDLE_SECS, Auth, AuthConfig, LoginOutcome, MAX_TRACKED_IPS, SESSION_COOKIE,
+        SessionStore,
     };
     use std::net::IpAddr;
     use std::sync::{Arc, Mutex};
@@ -403,11 +411,17 @@ mod tests {
         }
         // 第6次起锁定：即使凭证正确也在验证前拒绝（防爆破语义）
         assert!(
-            matches!(store.login(ip, &cfg, "admin", "wrong"), LoginOutcome::Locked),
+            matches!(
+                store.login(ip, &cfg, "admin", "wrong"),
+                LoginOutcome::Locked
+            ),
             "5次失败后应锁定"
         );
         assert!(
-            matches!(store.login(ip, &cfg, "admin", "s3cret"), LoginOutcome::Locked),
+            matches!(
+                store.login(ip, &cfg, "admin", "s3cret"),
+                LoginOutcome::Locked
+            ),
             "锁定期间正确凭证也应拒绝"
         );
         // 不同IP互不影响
@@ -503,7 +517,10 @@ mod tests {
         assert_eq!(plain.secure(), Some(false));
         let expired = super::build_expired_cookie(true);
         assert_eq!(expired.secure(), Some(true));
-        assert_eq!(expired.max_age(), Some(actix_web::cookie::time::Duration::ZERO));
+        assert_eq!(
+            expired.max_age(),
+            Some(actix_web::cookie::time::Duration::ZERO)
+        );
     }
 
     #[actix_web::test]
@@ -517,10 +534,7 @@ mod tests {
         let app = test::init_service(
             actix_web::App::new()
                 .wrap(Auth::new(store.clone(), cfg))
-                .route(
-                    "/api/protected",
-                    web::get().to(|| async { "secret-data" }),
-                ),
+                .route("/api/protected", web::get().to(|| async { "secret-data" })),
         )
         .await;
 

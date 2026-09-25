@@ -20,9 +20,9 @@ pub struct NotifyCondition {
     #[serde(default)]
     pub no_contains: Vec<u16>, // 响应码不在列表内则触发告警
     #[serde(default)]
-    pub contains: Vec<u16>,    // 响应码在列表内则触发告警
+    pub contains: Vec<u16>, // 响应码在列表内则触发告警
     #[serde(default)]
-    pub regex: String,         // 响应码正则匹配
+    pub regex: String, // 响应码正则匹配
     /// 阈值条件（THRESHOLD规则用）：如 {"metric":"cpu","op":">","value":80}
     #[serde(default)]
     pub threshold: Option<ThresholdCondition>,
@@ -77,10 +77,10 @@ impl CompareOp {
 /// 告警配置：通知类型 + 通知渠道 + 告警触发规则列表
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AlertVerificationRules {
-    pub notify_type: String,               // 通知渠道：FEISHU/DINGTALK/WECOM/EMAIL（大小写不敏感，经 NotifyType::parse 解析）
-    pub notify_config: NotifyConfig,       // 通知渠道配置
+    pub notify_type: String, // 通知渠道：FEISHU/DINGTALK/WECOM/EMAIL（大小写不敏感，经 NotifyType::parse 解析）
+    pub notify_config: NotifyConfig, // 通知渠道配置
     #[serde(default)]
-    pub rules: Vec<AlertSingleRule>,       // 告警触发规则列表
+    pub rules: Vec<AlertSingleRule>, // 告警触发规则列表
     /// 告警防抖：连续 N 次命中规则才发送告警（缺省1=首次命中即告警；根治网络抖动误报）
     #[serde(default)]
     pub consecutive_failures: Option<u32>,
@@ -108,15 +108,15 @@ pub struct NotifyConfig {
 /// EMAIL渠道的SMTP配置：直连SMTP服务器发信（465隐式TLS / 587 STARTTLS / 25明文）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EmailNotifyConfig {
-    pub smtp_host: String,          // SMTP服务器地址，如 smtp.example.com
+    pub smtp_host: String, // SMTP服务器地址，如 smtp.example.com
     #[serde(default = "default_smtp_port")]
-    pub smtp_port: u16,             // 465=隐式TLS，587=STARTTLS，25=明文
-    pub username: String,           // 认证用户名（通常为发件邮箱）
+    pub smtp_port: u16, // 465=隐式TLS，587=STARTTLS，25=明文
+    pub username: String,  // 认证用户名（通常为发件邮箱）
     #[serde(default)]
-    pub password: String,           // 认证密码/授权码；为空则跳过认证（本地relay场景）
+    pub password: String, // 认证密码/授权码；为空则跳过认证（本地relay场景）
     #[serde(default)]
-    pub from: Option<String>,       // 发件人；缺省使用username
-    pub to: Vec<String>,            // 收件人列表（至少一个）
+    pub from: Option<String>, // 发件人；缺省使用username
+    pub to: Vec<String>,   // 收件人列表（至少一个）
 }
 
 fn default_smtp_port() -> u16 {
@@ -126,7 +126,7 @@ fn default_smtp_port() -> u16 {
 /// 单条告警触发规则
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AlertSingleRule {
-    pub rule_type: AlertRuleTypes,  // 规则类型：RESPONSE_CODE/CONTENT/AVAILABILITY/THRESHOLD
+    pub rule_type: AlertRuleTypes, // 规则类型：RESPONSE_CODE/CONTENT/AVAILABILITY/THRESHOLD
     pub condition: NotifyCondition, // 触发条件
 }
 
@@ -164,7 +164,10 @@ mod notify_type_tests {
     fn parse_is_case_insensitive_and_trims() {
         assert_eq!(NotifyType::parse("FEISHU"), Some(NotifyType::Feishu));
         assert_eq!(NotifyType::parse("feishu"), Some(NotifyType::Feishu));
-        assert_eq!(NotifyType::parse("  DingTalk  "), Some(NotifyType::Dingtalk));
+        assert_eq!(
+            NotifyType::parse("  DingTalk  "),
+            Some(NotifyType::Dingtalk)
+        );
         assert_eq!(NotifyType::parse("wecom"), Some(NotifyType::Wecom));
         assert_eq!(NotifyType::parse("Email"), Some(NotifyType::Email));
         assert_eq!(NotifyType::parse("SMS"), Some(NotifyType::Sms));

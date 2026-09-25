@@ -46,7 +46,13 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
                 "/monitors/{id}/run",
                 web::post().to(monitor_handlers::run_monitor_once),
             )
-            .route("/status", web::get().to(status_handlers::get_console_status))
-            .route("/results", web::get().to(result_handlers::get_check_results)),
+            .route(
+                "/status",
+                web::get().to(status_handlers::get_console_status),
+            )
+            .route(
+                "/results",
+                web::get().to(result_handlers::get_check_results),
+            ),
     );
 }

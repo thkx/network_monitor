@@ -1,13 +1,13 @@
 // 控制台聚合视图：一次请求拿齐列表页所需全部数据（配置 + 各自最新一次检查结果 + 告警抑制状态）
 // 前端无需逐个监控再查结果。（从 monitor_handlers 抽出：聚合读取逻辑独立于 CRUD 编排）
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::response::{internal_error, DefaultResponseObj};
-use crate::database::pool::SqlitePool;
+use super::response::{DefaultResponseObj, internal_error};
 use crate::database::models::CheckResultModel;
+use crate::database::pool::SqlitePool;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::database::services::monitor_service::MonitorService;
 use crate::database::services::result_service::ResultService;
@@ -52,9 +52,7 @@ pub async fn get_console_status(
         }
     })
     .await
-    .map_err(|e| {
-        actix_web::error::ErrorInternalServerError(format!("状态读取阻塞任务失败: {e}"))
-    })?
+    .map_err(|e| actix_web::error::ErrorInternalServerError(format!("状态读取阻塞任务失败: {e}")))?
     .map_err(internal_error)?;
     let latest_map: HashMap<i32, &CheckResultModel> =
         latest.iter().map(|r| (r.monitor_id, r)).collect();
@@ -88,11 +86,11 @@ pub async fn get_console_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{get_console_status, MonitorStatusItem};
+    use super::{MonitorStatusItem, get_console_status};
     use crate::api::handles::monitor_handlers::run_monitor_once;
     use crate::api::handles::response::DefaultResponseObj;
-    use crate::database::pool::test_pool;
     use crate::database::models::MonitorConfigInsert;
+    use crate::database::pool::test_pool;
     use crate::database::repositories::monitor_repo::MonitorRepository;
     use crate::database::repositories::result_repo::CheckResultRepository;
     use crate::database::services::monitor_service::MonitorService;
@@ -132,10 +130,7 @@ mod tests {
                 .app_data(web::Data::new(metrics.clone()))
                 .app_data(web::Data::new(5u64))
                 .route("/api/status", web::get().to(get_console_status))
-                .route(
-                    "/api/monitors/{id}/run",
-                    web::post().to(run_monitor_once),
-                ),
+                .route("/api/monitors/{id}/run", web::post().to(run_monitor_once)),
         )
         .await;
 
@@ -209,7 +204,9 @@ mod tests {
         )
         .await;
 
-        let req = actix_web::test::TestRequest::get().uri("/api/status").to_request();
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/status")
+            .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
         let body: DefaultResponseObj<Vec<MonitorStatusItem>> =

@@ -186,7 +186,11 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
     let (tx, rx) = mpsc::channel::<MonitorResultMessage>(100);
     let result_service_for_loop = result_service.clone();
     let metrics_for_loop = metrics_registry.clone();
-    let consumer_handle = tokio::spawn(consume_results(result_service_for_loop, rx, metrics_for_loop));
+    let consumer_handle = tokio::spawn(consume_results(
+        result_service_for_loop,
+        rx,
+        metrics_for_loop,
+    ));
 
     // 4. 调度器加载启用配置并启动定时监控；API 增删改配置后可整体重建实现热更新
     let mut scheduler = Scheduler::new(pool.clone(), default_interval);
@@ -273,7 +277,7 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefi
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         match signal(SignalKind::terminate()) {
             Ok(mut term) => {
                 tokio::select! {
@@ -381,10 +385,7 @@ fn flush_batch(result_service: &ResultService, buffer: &mut Vec<MonitorResultMes
 // Join失败（阻塞任务panic）时数据仍在移入的副本里，随JoinError丢失——
 // 因此从JoinError的panic载荷无法取回，改为在移入前保留条数用于日志，
 // 并把未落库数据的丢失显式记录（CSV日志另有完整备份，可据此人工补录）
-async fn flush_batch_async(
-    result_service: &ResultService,
-    buffer: &mut Vec<MonitorResultMessage>,
-) {
+async fn flush_batch_async(result_service: &ResultService, buffer: &mut Vec<MonitorResultMessage>) {
     if buffer.is_empty() {
         return;
     }
@@ -412,7 +413,11 @@ async fn flush_batch_async(
 }
 
 // 把JSON配置导入monitor_config表（name有唯一约束，按名称去重保证幂等）
-fn import_monitor_list(monitor_service: &MonitorService, monitor_list: &[SelfDefineMonitorConfig], default_interval: u64) {
+fn import_monitor_list(
+    monitor_service: &MonitorService,
+    monitor_list: &[SelfDefineMonitorConfig],
+    default_interval: u64,
+) {
     for entry in monitor_list {
         let name = display_name(entry);
         match monitor_service.find_by_name(&name) {
@@ -484,4 +489,3 @@ fn read_monitor_list(file_name: &str) -> Vec<SelfDefineMonitorConfig> {
         }
     }
 }
-

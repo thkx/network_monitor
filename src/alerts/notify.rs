@@ -151,7 +151,11 @@ impl AlertSender for NotifyEngine {
                     "text": { "content": message }
                 });
                 let is_dingtalk = notify_type == NotifyType::Dingtalk;
-                let channel = if is_dingtalk { "钉钉" } else { "企业微信" };
+                let channel = if is_dingtalk {
+                    "钉钉"
+                } else {
+                    "企业微信"
+                };
                 // 钉钉"加签"安全设置：sign = base64(HMAC-SHA256(key=secret, "{毫秒时间戳}\n{secret}"))，
                 // URL编码后与timestamp一起拼接到webhook_url（URL已含timestamp参数则尊重手拼结果）
                 let mut url = self.notify_config.webhook_url.clone();
@@ -167,7 +171,8 @@ impl AlertSender for NotifyEngine {
                     let sep = if url.contains('?') { "&" } else { "?" };
                     url = format!("{url}{sep}timestamp={ts}&{encoded}");
                 }
-                self.post_webhook(url.as_str(), body, &message, channel).await
+                self.post_webhook(url.as_str(), body, &message, channel)
+                    .await
             }
         }
     }
@@ -211,14 +216,23 @@ impl NotifyEngine {
                     let body = body.clone();
                     let url = url.clone();
                     let channel = channel.clone();
-                    async move { Self::try_post(&client, &url, &body, &channel).await.map_err(|e| format!("第{}次重试: {}", attempt + 1, e)) }
+                    async move {
+                        Self::try_post(&client, &url, &body, &channel)
+                            .await
+                            .map_err(|e| format!("第{}次重试: {}", attempt + 1, e))
+                    }
                 },
                 &RETRY_DELAYS_SECS,
             )
             .await;
             match outcome {
                 Ok(()) => tracing::info!("{}告警重试成功: {}", channel, message),
-                Err(e) => tracing::error!("{}告警重试全部失败，通知可能丢失: {}（{}）", channel, message, e),
+                Err(e) => tracing::error!(
+                    "{}告警重试全部失败，通知可能丢失: {}（{}）",
+                    channel,
+                    message,
+                    e
+                ),
             }
         });
         SendOutcome::Deferred
@@ -308,8 +322,8 @@ where
 
 // 飞书签名算法：以 "{timestamp}\n{secret}" 为HMAC-SHA256密钥，对空消息签名后base64
 fn feishu_sign(timestamp: i64, secret: &str) -> String {
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -323,8 +337,8 @@ fn feishu_sign(timestamp: i64, secret: &str) -> String {
 // 钉钉加签算法：以 secret 为HMAC-SHA256密钥，对 "{毫秒时间戳}\n{secret}" 签名后base64
 // （与飞书方向相反：飞书密钥和时间戳串一起做密钥，钉钉时间戳串是被签消息）
 fn dingtalk_sign(timestamp_millis: i64, secret: &str) -> String {
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -337,7 +351,7 @@ fn dingtalk_sign(timestamp_millis: i64, secret: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{dingtalk_sign, feishu_sign, NotifyEngine, RETRY_DELAYS_SECS, retry_with_backoff};
+    use super::{NotifyEngine, RETRY_DELAYS_SECS, dingtalk_sign, feishu_sign, retry_with_backoff};
 
     #[test]
     fn feishu_sign_matches_reference_vector() {
@@ -411,8 +425,8 @@ mod tests {
 
     #[tokio::test]
     async fn try_post_fails_on_refused_connection() {
-        use std::time::Duration;
         use reqwest::Client;
+        use std::time::Duration;
         // 连接被拒（端口9）时try_post应快速返回Err，且错误信息含上下文
         let client = Client::builder()
             .timeout(Duration::from_millis(500))
@@ -486,13 +500,20 @@ mod tests {
 
     #[tokio::test]
     async fn try_post_fails_on_2xx_with_business_error() {
-        use std::time::Duration;
         use reqwest::Client;
+        use std::time::Duration;
         // HTTP 200但errcode非零：旧实现会误判成功导致告警静默丢失，必须报错并触发重试
-        let addr = spawn_fake_webhook(canned_200(r#"{"errcode":310000,"errmsg":"sign not match"}"#));
-        let client = Client::builder().timeout(Duration::from_secs(2)).no_proxy().build().unwrap();
+        let addr = spawn_fake_webhook(canned_200(
+            r#"{"errcode":310000,"errmsg":"sign not match"}"#,
+        ));
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap();
         let body = serde_json::json!({"msgtype": "text", "text": {"content": "t"}});
-        let r = NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
+        let r =
+            NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
         let err = r.expect_err("200+errcode!=0应判为业务失败");
         assert!(err.contains("业务错误"), "应标注为业务错误: {err}");
         assert!(err.contains("310000"), "应包含业务码: {err}");
@@ -500,12 +521,17 @@ mod tests {
 
     #[tokio::test]
     async fn try_post_succeeds_on_2xx_with_zero_errcode() {
-        use std::time::Duration;
         use reqwest::Client;
+        use std::time::Duration;
         let addr = spawn_fake_webhook(canned_200(r#"{"errcode":0,"errmsg":"ok"}"#));
-        let client = Client::builder().timeout(Duration::from_secs(2)).no_proxy().build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap();
         let body = serde_json::json!({"msgtype": "text", "text": {"content": "t"}});
-        let r = NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
+        let r =
+            NotifyEngine::try_post(&client, &format!("http://{addr}/hook"), &body, "钉钉").await;
         assert!(r.is_ok(), "errcode=0应视为发送成功: {r:?}");
     }
 }

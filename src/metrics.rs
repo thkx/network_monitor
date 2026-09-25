@@ -129,9 +129,7 @@ impl MetricsRegistry {
         ids.sort_unstable();
 
         let mut out = String::new();
-        out.push_str(
-            "# HELP network_monitor_up 目标最近一次检查是否可用（1可用/0不可用）\n",
-        );
+        out.push_str("# HELP network_monitor_up 目标最近一次检查是否可用（1可用/0不可用）\n");
         out.push_str("# TYPE network_monitor_up gauge\n");
         out.push_str("# HELP network_monitor_checks_total 检查总次数（按结果状态分组）\n");
         out.push_str("# TYPE network_monitor_checks_total counter\n");
@@ -143,12 +141,12 @@ impl MetricsRegistry {
             "# HELP network_monitor_last_check_timestamp_seconds 最近一次检查时间（unix秒）\n",
         );
         out.push_str("# TYPE network_monitor_last_check_timestamp_seconds gauge\n");
-        out.push_str("# HELP network_monitor_check_duration_seconds 检查耗时分布（秒，成功与失败均计入）\n");
+        out.push_str(
+            "# HELP network_monitor_check_duration_seconds 检查耗时分布（秒，成功与失败均计入）\n",
+        );
         out.push_str("# TYPE network_monitor_check_duration_seconds histogram\n");
         if alerting.is_some() {
-            out.push_str(
-                "# HELP network_monitor_alerting 是否处于告警抑制状态（1已告警未恢复）\n",
-            );
+            out.push_str("# HELP network_monitor_alerting 是否处于告警抑制状态（1已告警未恢复）\n");
             out.push_str("# TYPE network_monitor_alerting gauge\n");
         }
 
@@ -162,10 +160,7 @@ impl MetricsRegistry {
                 escape_label(&meta.name),
                 escape_label(&meta.monitor_type)
             );
-            out.push_str(&format!(
-                "network_monitor_up{{{}}} {}\n",
-                labels, m.last_up
-            ));
+            out.push_str(&format!("network_monitor_up{{{}}} {}\n", labels, m.last_up));
             out.push_str(&format!(
                 "network_monitor_checks_total{{{labels},status=\"ok\"}} {}\n",
                 m.checks_ok_total
@@ -230,7 +225,7 @@ fn escape_label(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_label, MetricsRegistry};
+    use super::{MetricsRegistry, escape_label};
     use crate::async_monitor::ResultRoute;
 
     fn route(id: Option<i32>, name: &str) -> ResultRoute {
@@ -254,18 +249,16 @@ mod tests {
         assert!(out.contains("status=\"failed\"} 1"));
         assert!(out.contains("network_monitor_last_response_time_milliseconds{monitor_id=\"7\""));
         assert!(out.contains("network_monitor_last_check_timestamp_seconds{monitor_id=\"7\""));
-        assert!(!out.contains("network_monitor_alerting"), "None时不输出alerting家族");
+        assert!(
+            !out.contains("network_monitor_alerting"),
+            "None时不输出alerting家族"
+        );
     }
 
     #[test]
     fn label_values_are_escaped() {
         let registry = MetricsRegistry::new();
-        registry.record(
-            &route(Some(1), "https://a.com/\"x\"\\y"),
-            "HTTP",
-            true,
-            1,
-        );
+        registry.record(&route(Some(1), "https://a.com/\"x\"\\y"), "HTTP", true, 1);
         let out = registry.render(None);
         // 引号与反斜杠必须转义，避免破坏Prometheus文本解析
         assert!(out.contains("name=\"https://a.com/\\\"x\\\"\\\\y\""));
@@ -305,9 +298,15 @@ mod tests {
         assert!(out.contains("network_monitor_alerting{monitor_id=\"1\""));
         assert!(out.contains("# TYPE network_monitor_alerting gauge"));
         // id=1告警中=1，id=2无记录=0
-        let line1 = out.lines().find(|l| l.contains("network_monitor_alerting") && l.contains("monitor_id=\"1\"")).unwrap();
+        let line1 = out
+            .lines()
+            .find(|l| l.contains("network_monitor_alerting") && l.contains("monitor_id=\"1\""))
+            .unwrap();
         assert!(line1.ends_with(" 1"));
-        let line2 = out.lines().find(|l| l.contains("network_monitor_alerting") && l.contains("monitor_id=\"2\"")).unwrap();
+        let line2 = out
+            .lines()
+            .find(|l| l.contains("network_monitor_alerting") && l.contains("monitor_id=\"2\""))
+            .unwrap();
         assert!(line2.ends_with(" 0"));
     }
 

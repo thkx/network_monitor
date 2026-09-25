@@ -1,7 +1,7 @@
 use super::Monitor;
 use super::types::{CheckResultDetail, MonitorConfig, UdpMonitorResult};
-use crate::tools::parse_host_port;
 use crate::domain::MonitorType;
+use crate::tools::parse_host_port;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 
@@ -64,11 +64,8 @@ impl Monitor for UdpMonitor {
                     sent = true;
                     let mut buf = [0u8; 1024];
                     // 等待响应，超时时间由config.timeout决定（见上方wait）
-                    if let Ok(Ok((n, src))) = tokio::time::timeout(
-                        wait,
-                        socket.recv_from(&mut buf),
-                    )
-                    .await
+                    if let Ok(Ok((n, src))) =
+                        tokio::time::timeout(wait, socket.recv_from(&mut buf)).await
                     {
                         // 源地址校验：UDP无连接，recv_from会收到任意来源的包（局域网广播、
                         // 无关服务、反射流量都可能污染结果）。仅接受来自探测目标的回包，
@@ -137,7 +134,10 @@ mod tests {
         // QNAME：3www 7example 3com 0
         assert_eq!(
             &pkt[12..pkt.len() - 4],
-            &[3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0]
+            &[
+                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
+                b'm', 0
+            ]
         );
         assert_eq!(&pkt[pkt.len() - 4..], &[0, 1, 0, 1], "QTYPE=A QCLASS=IN");
     }
@@ -166,11 +166,11 @@ mod tests {
     #[tokio::test]
     async fn udp_response_from_target_is_accepted() {
         use super::UdpMonitor;
+        use crate::domain::MonitorType;
         use crate::monitor::Monitor;
         use crate::monitor::types::{
             CheckResultDetail, MonitorConfig, MonitorConfigDetail, UdpMonitorConfig,
         };
-        use crate::domain::MonitorType;
 
         // 回显服务器：收到任意包原样回发（非DNS端口，走"任意回包"语义）
         let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

@@ -1,5 +1,5 @@
-use crate::database::pool::{SqlitePool, get_connection};
 use crate::database::models::{MonitorConfigInsert, MonitorConfigModel, MonitorConfigUpdate};
+use crate::database::pool::{SqlitePool, get_connection};
 use crate::database::schema::monitor_config;
 use diesel::prelude::*;
 use diesel::result::Error;
@@ -206,7 +206,9 @@ mod tests {
                 .unwrap();
             assert_eq!(total, 0, "check_result应被级联删除");
             assert!(
-                !AlertStateRepository::new(pool).get_alerting(created.id).unwrap(),
+                !AlertStateRepository::new(pool)
+                    .get_alerting(created.id)
+                    .unwrap(),
                 "alert_state应被级联删除"
             );
         }

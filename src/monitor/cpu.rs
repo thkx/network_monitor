@@ -2,7 +2,7 @@ use super::Monitor;
 use super::types::{CheckResultDetail, CpuMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
 use std::sync::Mutex;
-use sysinfo::{System, MINIMUM_CPU_UPDATE_INTERVAL};
+use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, System};
 
 pub struct CpuMonitor {
     // 跨轮次复用同一 System：避免每次 check 重建（重新探测 CPU 拓扑），
@@ -66,9 +66,9 @@ impl Monitor for CpuMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuMonitor, Monitor, MINIMUM_CPU_UPDATE_INTERVAL};
-    use crate::monitor::types::{CheckResultDetail, MonitorConfig, MonitorConfigDetail};
+    use super::{CpuMonitor, MINIMUM_CPU_UPDATE_INTERVAL, Monitor};
     use crate::domain::MonitorType;
+    use crate::monitor::types::{CheckResultDetail, MonitorConfig, MonitorConfigDetail};
 
     fn cpu_config() -> MonitorConfig {
         MonitorConfig {

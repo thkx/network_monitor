@@ -1,7 +1,7 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use serde::Deserialize;
 
-use super::response::{clamp_pagination, DefaultResponseObj, PageData};
+use super::response::{DefaultResponseObj, PageData, clamp_pagination};
 use crate::database::services::result_service::ResultService;
 
 use serde::Serialize;
@@ -79,8 +79,8 @@ pub async fn get_check_results(
 #[cfg(test)]
 mod tests {
     use super::get_check_results;
-    use crate::database::pool::test_pool;
     use crate::database::models::{CheckResultModel, CheckResultModelInsert};
+    use crate::database::pool::test_pool;
     use crate::database::repositories::result_repo::CheckResultRepository;
     use crate::database::repositories::test_support::create_test_monitor;
     use crate::database::services::result_service::ResultService;
@@ -130,7 +130,11 @@ mod tests {
             })
             .unwrap();
         }
-        (dir, ResultService::new(CheckResultRepository::new(pool)), mid)
+        (
+            dir,
+            ResultService::new(CheckResultRepository::new(pool)),
+            mid,
+        )
     }
 
     // 游标模式（cursor=true）逐页走完：跨页无重叠、满页给 next_cursor、末页给 None
@@ -146,7 +150,9 @@ mod tests {
 
         // 首页：cursor=true，page_size=2 → 取最新2条，next_cursor=末条id
         let req = actix_web::test::TestRequest::get()
-            .uri(&format!("/api/results?monitor_id={mid}&cursor=true&page_size=2"))
+            .uri(&format!(
+                "/api/results?monitor_id={mid}&cursor=true&page_size=2"
+            ))
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -161,7 +167,9 @@ mod tests {
 
         // 第二页：before_id=c1 → 再取2条，均在游标之前
         let req = actix_web::test::TestRequest::get()
-            .uri(&format!("/api/results?monitor_id={mid}&before_id={c1}&page_size=2"))
+            .uri(&format!(
+                "/api/results?monitor_id={mid}&before_id={c1}&page_size=2"
+            ))
             .to_request();
         let body: CursorResp =
             actix_web::test::read_body_json(actix_web::test::call_service(&app, req).await).await;
@@ -171,7 +179,9 @@ mod tests {
 
         // 末页：剩1条，不足page_size → next_cursor=None
         let req = actix_web::test::TestRequest::get()
-            .uri(&format!("/api/results?monitor_id={mid}&before_id={c2}&page_size=2"))
+            .uri(&format!(
+                "/api/results?monitor_id={mid}&before_id={c2}&page_size=2"
+            ))
             .to_request();
         let body: CursorResp =
             actix_web::test::read_body_json(actix_web::test::call_service(&app, req).await).await;
@@ -191,7 +201,9 @@ mod tests {
         )
         .await;
         let req = actix_web::test::TestRequest::get()
-            .uri(&format!("/api/results?monitor_id={mid}&page_no=1&page_size=10"))
+            .uri(&format!(
+                "/api/results?monitor_id={mid}&page_no=1&page_size=10"
+            ))
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);

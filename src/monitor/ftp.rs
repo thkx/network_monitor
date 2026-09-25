@@ -1,7 +1,7 @@
 use super::Monitor;
 use super::types::{CheckResultDetail, FtpMonitorResult, MonitorConfig};
-use crate::tools::parse_host_port;
 use crate::domain::MonitorType;
+use crate::tools::parse_host_port;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -91,9 +91,7 @@ impl Monitor for FtpMonitor {
 
 // 发送一条FTP命令（CRLF结尾）
 async fn send_cmd(stream: &mut TcpStream, cmd: &str) -> std::io::Result<()> {
-    stream
-        .write_all(format!("{}\r\n", cmd).as_bytes())
-        .await
+    stream.write_all(format!("{}\r\n", cmd).as_bytes()).await
 }
 
 // 读取一条完整的FTP回复（多行回复读至终结行），返回响应码；
@@ -130,8 +128,7 @@ fn parse_ftp_code(buf: &[u8]) -> Option<u16> {
     if b.len() < 3 || !b[..3].iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let code =
-        (b[0] - b'0') as u16 * 100 + (b[1] - b'0') as u16 * 10 + (b[2] - b'0') as u16;
+    let code = (b[0] - b'0') as u16 * 100 + (b[1] - b'0') as u16 * 10 + (b[2] - b'0') as u16;
     if b.len() == 3 || b[3] == b' ' {
         return Some(code);
     }
@@ -156,9 +153,9 @@ fn parse_ftp_code(buf: &[u8]) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MonitorConfig, MonitorType, parse_ftp_code, FtpMonitor};
-    use crate::monitor::types::CheckResultDetail;
+    use super::{FtpMonitor, MonitorConfig, MonitorType, parse_ftp_code};
     use crate::monitor::Monitor;
+    use crate::monitor::types::CheckResultDetail;
 
     #[test]
     fn ftp_reply_parser_handles_single_and_multiline() {
@@ -176,7 +173,10 @@ mod tests {
         // 4位数字开头不是响应码
         assert_eq!(parse_ftp_code(b"2200 garbage\r\n"), None);
         // 中间行混入类响应码内容不影响终结行判定
-        assert_eq!(parse_ftp_code(b"331-x\r\n123 noise\r\n331 ok\r\n"), Some(331));
+        assert_eq!(
+            parse_ftp_code(b"331-x\r\n123 noise\r\n331 ok\r\n"),
+            Some(331)
+        );
     }
 
     // 本地假FTP：按脚本回发响应，供端到端验证握手语义
@@ -231,10 +231,7 @@ mod tests {
     #[tokio::test]
     async fn ftp_monitor_reports_anonymous_refusal_as_handshake_only() {
         // 服务器讲FTP但拒绝匿名登录：握手完成（可用），logged_in=false
-        let addr = spawn_fake_ftp(&[
-            b"220 real ftp\r\n",
-            b"530 anonymous login not allowed\r\n",
-        ]);
+        let addr = spawn_fake_ftp(&[b"220 real ftp\r\n", b"530 anonymous login not allowed\r\n"]);
         let (_status, detail) = FtpMonitor::new().check(&ftp_config(addr)).await;
         let CheckResultDetail::Ftp(r) = detail else {
             panic!("应为Ftp结果");

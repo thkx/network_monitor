@@ -1,5 +1,5 @@
-use crate::database::pool::{get_connection, SqlitePool};
 use crate::database::models::{CheckResultModel, CheckResultModelInsert};
+use crate::database::pool::{SqlitePool, get_connection};
 use crate::database::schema::check_result;
 use diesel::prelude::*;
 use std::sync::Arc;
@@ -243,10 +243,7 @@ mod tests {
             .unwrap();
         assert_eq!(page2.len(), 2);
         assert!(page2[0].id < cursor, "第二页应严格在游标之前");
-        assert!(
-            page2.iter().all(|r| r.id < page1[1].id),
-            "跨页无重叠"
-        );
+        assert!(page2.iter().all(|r| r.id < page1[1].id), "跨页无重叠");
 
         // 第三页：剩1条
         let cursor2 = page2.last().unwrap().id;

@@ -1,7 +1,7 @@
 use super::Monitor;
 use super::types::{CheckResultDetail, MonitorConfig, TcpMonitorResult};
-use crate::tools::parse_host_port;
 use crate::domain::MonitorType;
+use crate::tools::parse_host_port;
 use std::time::Instant;
 
 pub struct TcpMonitor {}

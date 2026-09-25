@@ -1,6 +1,6 @@
 // 监控配置的 CRUD、启停与手动执行 handler。
 // 通用响应类型见 response，配置校验见 validation，控制台聚合视图见 status_handlers。
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use std::sync::{Arc, Mutex};
 
 use crate::async_monitor::{AsyncMonitor, ResultRoute};
@@ -8,13 +8,13 @@ use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
 use crate::database::services::build_monitor_insert;
 use crate::database::services::monitor_service::MonitorService;
 use crate::database::services::result_service::ResultService;
+use crate::domain::SelfDefineMonitorConfig;
 use crate::metrics::MetricsRegistry;
 use crate::monitor::MonitorFactory;
 use crate::scheduler::Scheduler;
-use crate::domain::SelfDefineMonitorConfig;
 
 use super::response::{
-    clamp_pagination, internal_error, DefaultResponseObj, PageData, PaginationParams,
+    DefaultResponseObj, PageData, PaginationParams, clamp_pagination, internal_error,
 };
 
 // 获取全部的监控配置处理函数
@@ -152,8 +152,10 @@ pub async fn update_monitor(
         method,
         monitor_type: Some(entry.monitor_type.to_string()),
         interval_ms: Some(
-            (entry.interval.unwrap_or(Arc::unwrap_or_clone(default_interval.into_inner())) * 1000)
-                as i32,
+            (entry
+                .interval
+                .unwrap_or(Arc::unwrap_or_clone(default_interval.into_inner()))
+                * 1000) as i32,
         ),
         timeout_ms: Some(entry.timeout.unwrap_or(5000) as i32),
         config_json: serde_json::to_string(&entry).ok(),
@@ -207,9 +209,7 @@ pub async fn delete_monitor(
     path: web::Path<i32>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
-    let affected = monitor_service
-        .delete_monitor(id)
-        .map_err(internal_error)?;
+    let affected = monitor_service.delete_monitor(id).map_err(internal_error)?;
     if affected == 0 {
         return Err(actix_web::error::ErrorNotFound(format!(
             "Monitor {} not found",
@@ -277,9 +277,7 @@ pub async fn run_monitor_once(
         .clone()
         .ok_or_else(|| actix_web::error::ErrorBadRequest("监控缺少config_json，无法执行"))?;
     let entry: SelfDefineMonitorConfig = serde_json::from_str(&config_json)
-        .map_err(|e| {
-            actix_web::error::ErrorInternalServerError(format!("配置解析失败: {}", e))
-        })?;
+        .map_err(|e| actix_web::error::ErrorInternalServerError(format!("配置解析失败: {}", e)))?;
     let name = row
         .name
         .clone()
@@ -406,10 +404,15 @@ mod tests {
         };
         let resp = actix_web::test::call_service(&app, send_post("/api/monitors", body)).await;
         assert_eq!(resp.status(), 200, "创建应成功");
-        let row = monitor_service.find_by_name("https://a.example.com")
+        let row = monitor_service
+            .find_by_name("https://a.example.com")
             .expect("查询应成功")
             .expect("应存在");
-        assert_eq!(row.interval_ms, Some(7000), "缺省interval应取app_data注入的7秒");
+        assert_eq!(
+            row.interval_ms,
+            Some(7000),
+            "缺省interval应取app_data注入的7秒"
+        );
 
         // 更新同样不带interval：DB列应保持服务端缺省，而非被重置成硬编码5
         let resp = actix_web::test::call_service(
@@ -422,7 +425,8 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), 200, "更新应成功");
-        let row = monitor_service.find_by_name("https://a.example.com")
+        let row = monitor_service
+            .find_by_name("https://a.example.com")
             .expect("查询应成功")
             .expect("应存在");
         assert_eq!(row.interval_ms, Some(7000), "更新后缺省interval不应被重置");
@@ -430,7 +434,10 @@ mod tests {
         // 更新撞名：把另一个监控的target改成与a重复 → UniqueViolation → 409
         let _ = actix_web::test::call_service(
             &app,
-            send_post("/api/monitors", r#"{"target":"https://b.example.com","monitor_type":"HTTP"}"#),
+            send_post(
+                "/api/monitors",
+                r#"{"target":"https://b.example.com","monitor_type":"HTTP"}"#,
+            ),
         )
         .await;
         let resp = actix_web::test::call_service(
@@ -438,7 +445,9 @@ mod tests {
             actix_web::test::TestRequest::put()
                 .uri(&format!("/api/monitors/{}", row.id))
                 .insert_header(("Content-Type", "application/json"))
-                .set_payload(r#"{"target":"https://b.example.com","monitor_type":"HTTP"}"#.to_string())
+                .set_payload(
+                    r#"{"target":"https://b.example.com","monitor_type":"HTTP"}"#.to_string(),
+                )
                 .to_request(),
         )
         .await;

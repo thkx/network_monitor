@@ -1,8 +1,8 @@
 // 告警规则的无状态评估函数：可用性判定、内容校验、阈值判定，以及消息文本构造。
 // 从 engine 抽出——这些是纯函数（输入检查结果，输出是否命中/消息），与状态机（防抖、
 // 抑制状态持久化）的变化原因不同：规则语义调整不碰状态机，状态机演进不碰规则判定。
-use crate::monitor::types::{CheckResult, CheckResultDetail};
 use crate::domain::{ContentVerificationRules, HttpMonitorResult, NotifyCondition};
+use crate::monitor::types::{CheckResult, CheckResultDetail};
 use regex::Regex;
 
 // 目标是否可用：任务执行失败、或各类型结果中的可达性标志为false 都视为不可用
@@ -164,7 +164,10 @@ pub(super) fn evaluate_threshold(
 pub(super) fn detail_summary(details: &CheckResultDetail) -> String {
     match details {
         CheckResultDetail::Http(r) => match r.basic_available.res_status_code {
-            Some(code) => format!("状态码 {}，耗时 {} ms", code, r.performance_timings.total_time),
+            Some(code) => format!(
+                "状态码 {}，耗时 {} ms",
+                code, r.performance_timings.total_time
+            ),
             None => format!("请求失败（{}）", failure_reason(r)),
         },
         // 有真实链路 RTT 时优先展示（含总耗时便于对比进程开销）；否则只报墙钟耗时
@@ -179,7 +182,11 @@ pub(super) fn detail_summary(details: &CheckResultDetail) -> String {
         CheckResultDetail::Udp(r) => format!(
             "响应 {}（{}），耗时 {} ms",
             r.response_received,
-            if r.dns_mode { "DNS语义" } else { "通用回包" },
+            if r.dns_mode {
+                "DNS语义"
+            } else {
+                "通用回包"
+            },
             r.elapsed_ms
         ),
         CheckResultDetail::Dns(r) => format!("解析 {}，耗时 {} ms", r.resolved, r.elapsed_ms),
@@ -188,7 +195,9 @@ pub(super) fn detail_summary(details: &CheckResultDetail) -> String {
             r.connected,
             r.handshake_ok,
             r.logged_in,
-            r.last_code.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
+            r.last_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string()),
             r.elapsed_ms
         ),
         CheckResultDetail::Traceroute(r) => format!("成功 {}，{} 跳", r.success, r.hops.len()),
@@ -216,13 +225,13 @@ mod tests {
         detail_summary, evaluate_content, evaluate_response_code, evaluate_threshold,
         failure_reason, is_target_available,
     };
-    use crate::monitor::types::{
-        CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
-    };
     use crate::domain::{
         BasicAvailability, ContentVerificationRules, ContentVerificationRulesResult,
         ContentVerificationRulesSingle, HttpMonitorResult, MonitorType, NotifyCondition,
         ThresholdCondition,
+    };
+    use crate::monitor::types::{
+        CheckResult, CheckResultDetail, CpuMonitorResult, DiskMonitorResult, IcmpMonitorResult,
     };
 
     // 构造HTTP类型的检查结果（其余字段走Default）
@@ -317,8 +326,12 @@ mod tests {
     #[test]
     fn response_code_missing_code_triggers() {
         // 请求失败拿不到响应码：直接告警
-        let msg = evaluate_response_code("t", &http_result(true, false, None), &cond(vec![], vec![], ""))
-            .expect("无响应码应告警");
+        let msg = evaluate_response_code(
+            "t",
+            &http_result(true, false, None),
+            &cond(vec![], vec![], ""),
+        )
+        .expect("无响应码应告警");
         assert!(msg.contains("未获取到响应码"));
     }
 
@@ -326,12 +339,20 @@ mod tests {
     fn response_code_contains_list_hits() {
         // contains 列表命中即告警；不在列表则静默
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(500)), &cond(vec![500, 502], vec![], ""))
-                .is_some()
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(500)),
+                &cond(vec![500, 502], vec![], "")
+            )
+            .is_some()
         );
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(200)), &cond(vec![500, 502], vec![], ""))
-                .is_none()
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(200)),
+                &cond(vec![500, 502], vec![], "")
+            )
+            .is_none()
         );
     }
 
@@ -339,12 +360,20 @@ mod tests {
     fn response_code_no_contains_list_hits() {
         // no_contains 允许列表：不在列表内即告警，在列表内静默
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(500)), &cond(vec![], vec![200, 301], ""))
-                .is_some()
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(500)),
+                &cond(vec![], vec![200, 301], "")
+            )
+            .is_some()
         );
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(200)), &cond(vec![], vec![200, 301], ""))
-                .is_none()
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(200)),
+                &cond(vec![], vec![200, 301], "")
+            )
+            .is_none()
         );
     }
 
@@ -352,16 +381,28 @@ mod tests {
     fn response_code_regex_hits() {
         // 正则命中响应码即告警；非法正则安全跳过（不 panic）
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(503)), &cond(vec![], vec![], r"5\d\d"))
-                .is_some()
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(503)),
+                &cond(vec![], vec![], r"5\d\d")
+            )
+            .is_some()
         );
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(200)), &cond(vec![], vec![], r"5\d\d"))
-                .is_none()
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(200)),
+                &cond(vec![], vec![], r"5\d\d")
+            )
+            .is_none()
         );
         assert!(
-            evaluate_response_code("t", &http_result(true, true, Some(500)), &cond(vec![], vec![], "([bad"))
-                .is_none(),
+            evaluate_response_code(
+                "t",
+                &http_result(true, true, Some(500)),
+                &cond(vec![], vec![], "([bad")
+            )
+            .is_none(),
             "非法正则应安全跳过"
         );
     }
@@ -369,7 +410,9 @@ mod tests {
     #[test]
     fn response_code_skipped_for_non_http() {
         // 非HTTP结果无响应码语义：直接跳过
-        assert!(evaluate_response_code("t", &icmp_result(), &cond(vec![], vec![200], "")).is_none());
+        assert!(
+            evaluate_response_code("t", &icmp_result(), &cond(vec![], vec![200], "")).is_none()
+        );
     }
 
     // ---- evaluate_content 直接单测 ----
@@ -447,7 +490,8 @@ mod tests {
             ("==", 50.0, 50.0, true),
             ("=", 50.0, 40.0, false),
         ] {
-            let got = evaluate_threshold(&cpu_result(cur, true), &threshold("cpu", op, val)).is_some();
+            let got =
+                evaluate_threshold(&cpu_result(cur, true), &threshold("cpu", op, val)).is_some();
             assert_eq!(got, hit, "op={op} val={val} cur={cur}");
         }
     }
@@ -461,7 +505,9 @@ mod tests {
     #[test]
     fn threshold_skipped_when_task_failed() {
         // 任务失败时数值不可信：跳过（失败由 AVAILABILITY 规则覆盖）
-        assert!(evaluate_threshold(&cpu_result(99.0, false), &threshold("cpu", ">", 1.0)).is_none());
+        assert!(
+            evaluate_threshold(&cpu_result(99.0, false), &threshold("cpu", ">", 1.0)).is_none()
+        );
     }
 
     #[test]

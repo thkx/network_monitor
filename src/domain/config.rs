@@ -116,13 +116,13 @@ pub enum ContentVerificationRules {
 /// 同时也是Web API创建/更新监控配置时请求体的结构
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SelfDefineMonitorConfig {
-    pub target: Option<String>,        // 监控的目标URL或IP地址
+    pub target: Option<String>, // 监控的目标URL或IP地址
     #[serde(default)]
-    pub monitor_type: MonitorType,     // 监控类型，缺省为HTTP
+    pub monitor_type: MonitorType, // 监控类型，缺省为HTTP
     #[serde(default)]
     pub method: Option<HttpMethodTypes>, // HTTP请求方法，缺省为GET
     #[serde(default)]
-    pub params: serde_json::Map<String, serde_json::Value>,    // 请求参数：GET类请求追加为URL查询参数，POST类请求作为JSON请求体
+    pub params: serde_json::Map<String, serde_json::Value>, // 请求参数：GET类请求追加为URL查询参数，POST类请求作为JSON请求体
     #[serde(default)]
     pub headers: HashMap<String, String>, // 自定义请求头
     #[serde(default)]
@@ -137,11 +137,11 @@ pub struct SelfDefineMonitorConfig {
     #[serde(default)]
     pub alert_rules: Option<AlertVerificationRules>, // 告警配置
     #[serde(default)]
-    pub interval: Option<u64>,         // 监控间隔，单位秒
+    pub interval: Option<u64>, // 监控间隔，单位秒
     #[serde(default)]
-    pub timeout: Option<u64>,          // HTTP监控超时时间，单位毫秒
+    pub timeout: Option<u64>, // HTTP监控超时时间，单位毫秒
     #[serde(default)]
-    pub description: Option<String>,   // 描述信息
+    pub description: Option<String>, // 描述信息
 }
 
 // 监控项的展示名称：优先使用target，没有target时（如CPU/MEMORY/DISK监控）使用监控类型名
