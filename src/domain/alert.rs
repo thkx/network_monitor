@@ -17,10 +17,12 @@ pub enum AlertRuleTypes {
 /// 告警触发条件
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct NotifyCondition {
-    #[serde(default)]
-    pub no_contains: Vec<u16>, // 响应码不在列表内则触发告警
-    #[serde(default)]
-    pub contains: Vec<u16>, // 响应码在列表内则触发告警
+    /// 允许的响应码白名单：响应码不在此列表内则触发告警（原名 no_contains）
+    #[serde(default, alias = "no_contains")]
+    pub allowed_codes: Vec<u16>,
+    /// 异常响应码黑名单：响应码在此列表内则触发告警（原名 contains）
+    #[serde(default, alias = "contains")]
+    pub deny_codes: Vec<u16>,
     #[serde(default)]
     pub regex: String, // 响应码正则匹配
     /// 阈值条件（THRESHOLD规则用）：如 {"metric":"cpu","op":">","value":80}

@@ -340,12 +340,12 @@ mod tests {
         }
     }
 
-    fn response_code_rule(no_contains: Vec<u16>) -> AlertSingleRule {
+    fn response_code_rule(allowed_codes: Vec<u16>) -> AlertSingleRule {
         AlertSingleRule {
             rule_type: AlertRuleTypes::ResponseCode,
             condition: NotifyCondition {
-                no_contains,
-                contains: vec![],
+                allowed_codes,
+                deny_codes: vec![],
                 regex: String::new(),
                 ..Default::default()
             },
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn response_code_rule_matches_no_contains() {
+    fn response_code_rule_matches_allowed_codes() {
         let engine = engine_with_rules(vec![response_code_rule(vec![200, 301])]);
         assert!(
             engine

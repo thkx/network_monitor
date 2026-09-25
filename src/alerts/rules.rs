@@ -38,8 +38,8 @@ pub(super) fn evaluate_response_code(
         return None;
     };
     let NotifyCondition {
-        contains,
-        no_contains,
+        deny_codes,
+        allowed_codes,
         regex,
         ..
     } = condition;
@@ -51,18 +51,18 @@ pub(super) fn evaluate_response_code(
             failure_reason(http_result)
         ));
     };
-    // contains列表非空时：响应码在列表内则触发告警
-    if !contains.is_empty() && contains.contains(&code) {
+    // deny_codes 列表非空时：响应码在列表内则触发告警
+    if !deny_codes.is_empty() && deny_codes.contains(&code) {
         return Some(format!(
             "[监控告警] target: {} | 响应码{}命中异常列表{:?}",
-            target, code, contains
+            target, code, deny_codes
         ));
     }
-    // no_contains列表非空时：响应码不在列表内则触发告警
-    if !no_contains.is_empty() && !no_contains.contains(&code) {
+    // allowed_codes 列表非空时：响应码不在列表内则触发告警
+    if !allowed_codes.is_empty() && !allowed_codes.contains(&code) {
         return Some(format!(
             "[监控告警] target: {} | 响应码{}不在允许列表{:?}）",
-            target, code, no_contains
+            target, code, allowed_codes
         ));
     }
     // regex非空时：响应码命中正则则触发告警
@@ -267,10 +267,10 @@ mod tests {
         }
     }
 
-    fn cond(contains: Vec<u16>, no_contains: Vec<u16>, regex: &str) -> NotifyCondition {
+    fn cond(deny_codes: Vec<u16>, allowed_codes: Vec<u16>, regex: &str) -> NotifyCondition {
         NotifyCondition {
-            contains,
-            no_contains,
+            deny_codes,
+            allowed_codes,
             regex: regex.to_string(),
             ..Default::default()
         }
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn response_code_contains_list_hits() {
-        // contains 列表命中即告警；不在列表则静默
+        // deny_codes 列表命中即告警；不在列表则静默
         assert!(
             evaluate_response_code(
                 "t",
@@ -357,8 +357,8 @@ mod tests {
     }
 
     #[test]
-    fn response_code_no_contains_list_hits() {
-        // no_contains 允许列表：不在列表内即告警，在列表内静默
+    fn response_code_allowed_list_hits() {
+        // allowed_codes 允许列表：不在列表内即告警，在列表内静默
         assert!(
             evaluate_response_code(
                 "t",
@@ -375,6 +375,20 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    // 向后兼容：旧配置里的 no_contains/contains 键仍能反序列化到新字段
+    #[test]
+    fn legacy_code_keys_deserialize_via_alias() {
+        let c: NotifyCondition =
+            serde_json::from_str(r#"{"no_contains":[200],"contains":[500]}"#).unwrap();
+        assert_eq!(c.allowed_codes, vec![200]);
+        assert_eq!(c.deny_codes, vec![500]);
+        // 新键同样可用
+        let c2: NotifyCondition =
+            serde_json::from_str(r#"{"allowed_codes":[204],"deny_codes":[503]}"#).unwrap();
+        assert_eq!(c2.allowed_codes, vec![204]);
+        assert_eq!(c2.deny_codes, vec![503]);
     }
 
     #[test]

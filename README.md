@@ -71,7 +71,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
       { "rule_type": "AVAILABILITY", "condition": {} },
       {
         "rule_type": "RESPONSE_CODE",
-        "condition": { "no_contains": [200, 301] }
+        "condition": { "allowed_codes": [200, 301] }
       }
     ],
     "consecutive_failures": 3,
@@ -81,6 +81,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 ```
 
 - `notify_type` 支持 `FEISHU` / `DINGTALK` / `WECOM` / `EMAIL`（大小写不敏感）
+- `RESPONSE_CODE` 条件：`allowed_codes`（白名单，响应码不在其中即告警）/ `deny_codes`（黑名单，响应码在其中即告警）/ `regex`（旧键 `no_contains`/`contains` 经 serde alias 仍兼容）
 - 钉钉机器人开启"加签"安全设置时配置 `secret` 即可，引擎自动计算签名并拼接 `timestamp`/`sign` 到 webhook_url（URL 已含 timestamp 参数时不覆盖，兼容手拼）
 - `AVAILABILITY` 对所有监控类型生效；`RESPONSE_CODE` / `CONTENT` 仅对 HTTP 生效
 - **EMAIL 渠道**：在 `notify_config.email` 配置 SMTP 即可，如
@@ -295,7 +296,7 @@ docker compose up -d
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（157个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
+cargo test          # 运行全部测试（158个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```
