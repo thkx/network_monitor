@@ -34,7 +34,7 @@ const HEADER: [&str; 6] = ["时间", "检查ID", "网址", "状态", "响应时�
 // 由基础路径与日期派生当日文件名：把日期插到扩展名之前（无扩展名则直接追加）。
 // monitor_log.csv + 2025-01-01 -> monitor_log-2025-01-01.csv
 fn dated_path(base: &str, date: &str) -> String {
-    let last_sep = base.rfind(|c| c == '/' || c == '\\');
+    let last_sep = base.rfind(['/', '\\']);
     match base.rfind('.') {
         // 仅当 '.' 在最后一个路径分隔符之后（即属于文件名而非目录）时才视为扩展名
         Some(dot) if last_sep.is_none_or(|s| dot > s) => {
