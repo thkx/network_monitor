@@ -12,7 +12,7 @@ use crate::async_monitor::{AsyncMonitor, MonitorResultMessage, ResultRoute};
 use crate::database::models::MonitorConfigModel;
 use crate::database::pool::SqlitePool;
 use crate::database::services::monitor_service::MonitorService;
-use crate::domain::{SelfDefineMonitorConfig, display_name};
+use crate::domain::{MonitorDefinition, display_name};
 use crate::monitor::MonitorFactory;
 use crate::monitor::types::MonitorConfig;
 
@@ -91,7 +91,7 @@ impl Scheduler {
             );
             return;
         };
-        let entry: SelfDefineMonitorConfig = match serde_json::from_str(&config_json) {
+        let entry: MonitorDefinition = match serde_json::from_str(&config_json) {
             Ok(entry) => entry,
             Err(e) => {
                 tracing::error!("监控配置 {} (id={}) 解析失败: {}", row.target, row.id, e);

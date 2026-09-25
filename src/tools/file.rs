@@ -1,5 +1,5 @@
 // 定义相关的工具函数
-use crate::domain::SelfDefineMonitorConfig;
+use crate::domain::MonitorDefinition;
 use std::fs;
 use std::path::PathBuf;
 
@@ -12,9 +12,9 @@ pub fn get_file_path(file_name: &str) -> PathBuf {
 /// 读取JSON配置文件，解析为自定义监控配置列表
 pub fn read_json_file(
     file_path: &str,
-) -> Result<Vec<SelfDefineMonitorConfig>, Box<dyn std::error::Error>> {
+) -> Result<Vec<MonitorDefinition>, Box<dyn std::error::Error>> {
     let file_path = get_file_path(file_path);
     let content = fs::read_to_string(file_path)?;
-    let json_data: Vec<SelfDefineMonitorConfig> = serde_json::from_str(&content)?;
+    let json_data: Vec<MonitorDefinition> = serde_json::from_str(&content)?;
     Ok(json_data)
 }

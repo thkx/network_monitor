@@ -4,7 +4,7 @@
 
 use crate::domain::{
     HttpBody, HttpBodyConfig, HttpMethodTypes, HttpMonitorResult, MonitorType,
-    SelfDefineMonitorConfig,
+    MonitorDefinition,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -26,7 +26,7 @@ pub struct MonitorConfig {
 impl MonitorConfig {
     // 从JSON配置项构建运行时监控配置（配置转换的唯一位置）
     // default_interval：配置项未指定interval时使用的默认监控间隔（来自命令行参数）
-    pub fn from_entry(entry: &SelfDefineMonitorConfig, default_interval: u64) -> Self {
+    pub fn from_entry(entry: &MonitorDefinition, default_interval: u64) -> Self {
         let monitor_type = entry.monitor_type;
         // 检查超时（毫秒）：全类型共用，HTTP用于请求超时，命令类用于兜底kill
         let timeout_ms = entry.timeout.unwrap_or(5000);
@@ -415,11 +415,11 @@ mod tests {
         CheckResult, CheckResultDetail, MonitorConfig, MonitorConfigDetail, MonitorType,
         UnknownMonitorResult,
     };
-    use crate::domain::{HttpBody, HttpMethodTypes, SelfDefineMonitorConfig};
+    use crate::domain::{HttpBody, HttpMethodTypes, MonitorDefinition};
     use reqwest::header::{CONTENT_TYPE, HeaderValue};
 
     // 从JSON构造配置项（与API请求体/monitor_list.json的实际入参路径一致）
-    fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
+    fn entry_from_json(json: &str) -> MonitorDefinition {
         serde_json::from_str(json).expect("测试JSON应可反序列化")
     }
 

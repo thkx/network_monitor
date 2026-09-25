@@ -112,10 +112,11 @@ pub enum ContentVerificationRules {
     Default,
 }
 
-/// 自定义监控配置，用于从JSON文件中读取监控任务列表（每个监控引擎的参数都是一个对象）
-/// 同时也是Web API创建/更新监控配置时请求体的结构
+/// 监控定义：用于从JSON文件中读取监控任务列表（每个监控引擎的参数都是一个对象），
+/// 同时也是Web API创建/更新监控配置时请求体的结构。
+/// （原名 SelfDefineMonitorConfig，保留为过渡别名见下方 `pub type`）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SelfDefineMonitorConfig {
+pub struct MonitorDefinition {
     pub target: Option<String>, // 监控的目标URL或IP地址
     #[serde(default)]
     pub monitor_type: MonitorType, // 监控类型，缺省为HTTP
@@ -156,9 +157,15 @@ fn default_true() -> bool {
     true
 }
 
+/// 过渡别名：旧名 SelfDefineMonitorConfig 保留，逐步迁移到 MonitorDefinition。
+/// 类型别名不影响 JSON（结构按字段反序列化，与 Rust 类型名无关）。
+/// 本包为二进制 crate、内部已全部改用新名，别名无内部引用，故显式 allow。
+#[allow(dead_code)]
+pub type SelfDefineMonitorConfig = MonitorDefinition;
+
 // 监控项的展示名称：优先使用target，没有target时（如CPU/MEMORY/DISK监控）使用监控类型名
 // （此前住在main.rs，scheduler/api需要跨层引用，随配置展示语义归位到类型模块）
-pub fn display_name(entry: &SelfDefineMonitorConfig) -> String {
+pub fn display_name(entry: &MonitorDefinition) -> String {
     entry
         .target
         .clone()

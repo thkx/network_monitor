@@ -50,7 +50,7 @@ mod tools;
 
 // 全局通用的领域类型定义模块（输入配置 / 探测结果 / 告警通知）
 mod domain;
-use domain::{SelfDefineMonitorConfig, display_name};
+use domain::{MonitorDefinition, display_name};
 
 use actix_web::{App, HttpServer, web};
 use clap::Parser;
@@ -138,7 +138,7 @@ async fn main() {
 // 4.后台消费监控结果（CSV日志+数据库持久化+告警） 5.启动Web API服务
 // default_interval：配置项未指定interval时的默认监控间隔（--interval，秒），
 // 调度任务与手动执行接口共用同一来源（此前两处各自写死5，且Server模式无法配置）
-async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<SelfDefineMonitorConfig>) {
+async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorDefinition>) {
     // 1. 建立数据库连接（带重试，自动执行迁移建表）
     let pool = match establish_database_connection().await {
         Ok(pool) => pool,
@@ -418,7 +418,7 @@ async fn flush_batch_async(result_service: &ResultService, buffer: &mut Vec<Moni
 // 把JSON配置导入monitor_config表（name有唯一约束，按名称去重保证幂等）
 fn import_monitor_list(
     monitor_service: &MonitorService,
-    monitor_list: &[SelfDefineMonitorConfig],
+    monitor_list: &[MonitorDefinition],
     default_interval: u64,
 ) {
     for entry in monitor_list {
@@ -483,7 +483,7 @@ fn csv_log_path() -> String {
 }
 
 // 获取监控的列表（从JSON配置文件读取，每个监控引擎的参数都是一个对象）
-fn read_monitor_list(file_name: &str) -> Vec<SelfDefineMonitorConfig> {
+fn read_monitor_list(file_name: &str) -> Vec<MonitorDefinition> {
     match tools::read_json_file(file_name) {
         Ok(list) => list,
         Err(err) => {

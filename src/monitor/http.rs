@@ -659,11 +659,11 @@ mod tests {
     // collect_timings 的 serde 默认：缺省字段应回落为 true（保持既有行为），显式 false 生效
     #[test]
     fn collect_timings_serde_default_is_true() {
-        use crate::domain::SelfDefineMonitorConfig;
-        let omitted: SelfDefineMonitorConfig =
+        use crate::domain::MonitorDefinition;
+        let omitted: MonitorDefinition =
             serde_json::from_str(r#"{"target":"https://x.com","monitor_type":"HTTP"}"#).unwrap();
         assert!(omitted.collect_timings, "缺省应为 true");
-        let explicit: SelfDefineMonitorConfig = serde_json::from_str(
+        let explicit: MonitorDefinition = serde_json::from_str(
             r#"{"target":"https://x.com","monitor_type":"HTTP","collect_timings":false}"#,
         )
         .unwrap();

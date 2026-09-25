@@ -3,11 +3,11 @@
 use regex::Regex;
 
 use crate::domain::{
-    AlertRuleTypes, ContentVerificationRules, NotifyType, SelfDefineMonitorConfig,
+    AlertRuleTypes, ContentVerificationRules, NotifyType, MonitorDefinition,
 };
 
 // 创建/更新前的配置校验：非法配置返回400，避免脏配置入库
-pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web::Error> {
+pub fn validate_config(entry: &MonitorDefinition) -> Result<(), actix_web::Error> {
     // interval下限1秒：0会造成高频空转甚至busy-loop轰炸目标；上限1天防误配
     if let Some(v) = entry.interval {
         if v == 0 {
@@ -112,9 +112,9 @@ pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web:
 #[cfg(test)]
 mod tests {
     use super::validate_config;
-    use crate::domain::SelfDefineMonitorConfig;
+    use crate::domain::MonitorDefinition;
 
-    fn entry_from_json(json: &str) -> SelfDefineMonitorConfig {
+    fn entry_from_json(json: &str) -> MonitorDefinition {
         serde_json::from_str(json).expect("测试JSON应可反序列化")
     }
 

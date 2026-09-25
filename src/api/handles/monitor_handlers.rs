@@ -8,7 +8,7 @@ use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
 use crate::database::services::build_monitor_insert;
 use crate::database::services::monitor_service::MonitorService;
 use crate::database::services::result_service::ResultService;
-use crate::domain::SelfDefineMonitorConfig;
+use crate::domain::MonitorDefinition;
 use crate::metrics::MetricsRegistry;
 use crate::monitor::MonitorFactory;
 use crate::scheduler::Scheduler;
@@ -101,7 +101,7 @@ pub async fn create_monitor(
     monitor_service: web::Data<MonitorService>,
     scheduler: web::Data<Arc<Mutex<Scheduler>>>, // 配置变更后重建监控任务（热更新）
     default_interval: web::Data<u64>,            // interval未配置时的缺省间隔（与调度器同源）
-    body: web::Json<SelfDefineMonitorConfig>,
+    body: web::Json<MonitorDefinition>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let entry = body.into_inner();
     super::validation::validate_config(&entry)?;
@@ -146,7 +146,7 @@ pub async fn update_monitor(
     scheduler: web::Data<Arc<Mutex<Scheduler>>>,
     default_interval: web::Data<u64>, // interval未配置时的缺省间隔（与调度器同源）
     path: web::Path<i32>,
-    body: web::Json<SelfDefineMonitorConfig>,
+    body: web::Json<MonitorDefinition>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
     let entry = body.into_inner();
@@ -292,7 +292,7 @@ pub async fn run_monitor_once(
         .config_json
         .clone()
         .ok_or_else(|| actix_web::error::ErrorBadRequest("监控缺少config_json，无法执行"))?;
-    let entry: SelfDefineMonitorConfig = serde_json::from_str(&config_json)
+    let entry: MonitorDefinition = serde_json::from_str(&config_json)
         .map_err(|e| actix_web::error::ErrorInternalServerError(format!("配置解析失败: {}", e)))?;
     let name = row
         .name

@@ -2,13 +2,13 @@ pub mod monitor_service;
 pub mod result_service;
 
 use crate::database::models::MonitorConfigInsert;
-use crate::domain::SelfDefineMonitorConfig;
+use crate::domain::MonitorDefinition;
 
 /// 把页面/JSON提交的监控配置项转换为数据库插入结构
 /// name取target（无target的系统类监控取监控类型名），config_json保存完整原始配置用于还原
 /// default_interval：interval未配置时写入DB列的缺省间隔（与调度器from_entry同源，保证列值=实际排程值）
 pub fn build_monitor_insert(
-    entry: &SelfDefineMonitorConfig,
+    entry: &MonitorDefinition,
     default_interval: u64,
 ) -> MonitorConfigInsert {
     let target = entry
