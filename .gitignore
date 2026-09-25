@@ -2,4 +2,5 @@
 /db/
 /logs/
 /monitor_log.csv
+/monitor_*.csv
 .env
