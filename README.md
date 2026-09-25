@@ -147,6 +147,13 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 路径不存在或响应体非 JSON 时静默跳过，不影响可用性判定。
 
+### 分段耗时开关（HTTP）
+
+HTTP 检查默认会另建一次探测连接采集 DNS/TCP/TLS 分段耗时与证书信息（近似值）。
+高频或大量 HTTP 监控可按需关闭以省去每次检查的额外连接开销——设
+`"collect_timings": false`（缺省 `true`），此时 `performance_timings` 的 dns/tcp/tls
+段为 0，客户端实测的 TTFB/总耗时不受影响。
+
 ## 配置校验规则
 
 创建/更新监控时服务端校验（非法配置返回 400）：
@@ -284,7 +291,7 @@ docker compose up -d
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（149个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
+cargo test          # 运行全部测试（152个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```

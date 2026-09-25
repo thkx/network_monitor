@@ -391,8 +391,12 @@ impl Monitor for HttpMonitor {
                     Ok(response) => {
                         // send() 返回即已收到响应头，此前耗时近似首字节时间（TTFB）
                         let ttfb_ms = start_time_instant.elapsed().as_millis();
-                        // 另建探测连接采集 dns/tcp/tls 近似耗时与证书
-                        let timings = collect_timings(config.target.as_ref().unwrap()).await;
+                        // 另建探测连接采集 dns/tcp/tls 近似耗时与证书（可按配置关闭省开销）
+                        let timings = if detail.collect_timings {
+                            collect_timings(config.target.as_ref().unwrap()).await
+                        } else {
+                            Default::default()
+                        };
                         // response 后续被 text() 取走所有权，这里先抽出需要的字段
                         let status_code = response.status().as_u16();
                         let version = response.version();
@@ -505,6 +509,7 @@ mod tests {
                 body: None,
                 rules: if rules.is_empty() { None } else { Some(rules) },
                 business_metric_fields: metric_fields,
+                collect_timings: true,
             }),
         }
     }
@@ -612,6 +617,7 @@ mod tests {
                 body: None,
                 rules: None,
                 business_metric_fields: vec![],
+                collect_timings: true,
             }),
         };
         let (status, detail) = HttpMonitor::new().check(&config).await;
@@ -628,6 +634,40 @@ mod tests {
             r.error_kind
         );
         assert!(r.error_message.is_some(), "失败结果应携带错误原因");
+    }
+
+    // collect_timings=false：跳过 dns/tcp/tls 探测连接，分段耗时为 0，
+    // 但客户端实测的 ttfb/total 不受影响，可用性判定照常
+    #[tokio::test]
+    async fn collect_timings_false_skips_probe() {
+        let addr = spawn_fake_http(canned_200("text/plain", "ok"));
+        let mut cfg = http_config(addr, vec![], vec![]);
+        if let MonitorConfigDetail::Http(ref mut d) = cfg.details {
+            d.collect_timings = false;
+        }
+        let (_, detail) = HttpMonitor::new().check(&cfg).await;
+        let CheckResultDetail::Http(r) = detail else {
+            panic!("应为HTTP结果");
+        };
+        assert!(r.basic_available.is_reachable);
+        assert_eq!(r.performance_timings.dns_lookup_time, 0);
+        assert_eq!(r.performance_timings.tcp_connect_time, 0);
+        assert_eq!(r.performance_timings.tls_handshake_time, 0);
+        assert!(r.performance_timings.total_time >= r.performance_timings.first_byte_time);
+    }
+
+    // collect_timings 的 serde 默认：缺省字段应回落为 true（保持既有行为），显式 false 生效
+    #[test]
+    fn collect_timings_serde_default_is_true() {
+        use crate::domain::SelfDefineMonitorConfig;
+        let omitted: SelfDefineMonitorConfig =
+            serde_json::from_str(r#"{"target":"https://x.com","monitor_type":"HTTP"}"#).unwrap();
+        assert!(omitted.collect_timings, "缺省应为 true");
+        let explicit: SelfDefineMonitorConfig = serde_json::from_str(
+            r#"{"target":"https://x.com","monitor_type":"HTTP","collect_timings":false}"#,
+        )
+        .unwrap();
+        assert!(!explicit.collect_timings, "显式 false 应生效");
     }
 
     // charset 从 Content-Type 参数解析：大小写不敏感、去引号与空白、无参数返回 None
@@ -675,6 +715,7 @@ mod tests {
             body: None,
             rules: None,
             business_metric_fields: vec![],
+            collect_timings: true,
         };
         let headers = reqwest::header::HeaderMap::new();
         let r = assemble_success(

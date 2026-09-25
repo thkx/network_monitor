@@ -145,6 +145,15 @@ pub struct SelfDefineMonitorConfig {
     /// 分组标签（可选）：用于列表页按业务分组筛选（?tag=）；空/缺省为不分组
     #[serde(default)]
     pub tag: Option<String>,
+    /// 是否采集 DNS/TCP/TLS 分段耗时（HTTP 专用，另建一次探测连接）：默认 true；
+    /// 高频/大量 HTTP 监控可设 false 省去每次检查的额外探测连接，此时分段耗时为 0
+    #[serde(default = "default_true")]
+    pub collect_timings: bool,
+}
+
+// serde 默认值助手：collect_timings 缺省为 true（保持既有行为）
+fn default_true() -> bool {
+    true
 }
 
 // 监控项的展示名称：优先使用target，没有target时（如CPU/MEMORY/DISK监控）使用监控类型名
