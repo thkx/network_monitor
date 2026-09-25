@@ -9,7 +9,7 @@ use std::sync::Mutex;
 #[derive(Debug, Clone)]
 pub struct UrlLogResult {
     pub check_id: String, // 本次检查的唯一ID（对应CheckResult.id，用于关联数据库与日志）
-    pub url: String,
+    pub monitor: String,  // 监控项展示名（target 或类型名），此前误名为 url——非HTTP监控无URL
     pub status: bool,
     pub response_time: u128,
     pub status_code: Option<u16>,
@@ -92,7 +92,7 @@ impl CsvLogger {
         inner.writer.write_record(&[
             Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             result.check_id,
-            result.url,
+            result.monitor,
             if result.status {
                 "Success".to_string()
             } else {
@@ -114,7 +114,7 @@ mod tests {
     fn rec(id: &str) -> UrlLogResult {
         UrlLogResult {
             check_id: id.to_string(),
-            url: "t".to_string(),
+            monitor: "t".to_string(),
             status: true,
             response_time: 1,
             status_code: Some(200),

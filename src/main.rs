@@ -449,7 +449,7 @@ fn log_result(logger: &CsvLogger, name: &str, result: &CheckResult) {
     let check_id = format!("{:x}", result.id);
     if let Err(e) = logger.log(UrlLogResult {
         check_id: check_id.clone(),
-        url: name.to_string(),
+        monitor: name.to_string(),
         status,
         response_time,
         status_code,
