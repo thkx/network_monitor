@@ -16,6 +16,7 @@
   - 状态机式告警：故障只告警一次，恢复时发送恢复通知，抑制状态持久化到数据库（重启不重复告警）
   - 通知渠道：飞书（可选 secret 签名）、钉钉（可选 secret 自动加签）、企业微信、邮件（SMTP）；webhook 发送超时 5 秒不阻塞监控任务，邮件会话整体后台化
 - **数据可靠性**：SQLite WAL 模式 + busy_timeout、连接池、迁移自动执行、结果保留策略（默认 30 天）
+- **采集效率**：系统资源监控（CPU/MEMORY/PROCESS）跨轮次复用 `sysinfo::System` 实例，CPU 仅首轮预热建立采样基线、之后直接用上一轮采样点，免去每轮固定的采样间隔等待
 
 ## 快速开始
 
@@ -88,6 +89,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 - **SMS 未实现**：配置期直接返回 400 拒绝，不做静默占位
 - **防抖**：`consecutive_failures` 连续 N 次命中才发告警、`consecutive_successes` 连续 M 次正常才发恢复通知（缺省均为 1；可根治网络抖动误报）
 - **失败重试**：通知发送失败后自动后台退避重试（1s/5s/30s/2m/5m 共 5 次），不阻塞监控任务循环；重试成功与最终放弃均有明确日志
+- **发送确认语义**：webhook 首发成功才置位告警抑制状态；首发失败（已转后台重试）不置位、重置防抖，下一轮达到阈值时重发——修复"重试耗尽后通知丢失而抑制状态已置位、故障期间不再尝试"的静默丢失（重复告警优于漏告警）
 - **业务码校验**：飞书/钉钉/企微业务失败（签名错、关键词不符等）时 HTTP 仍返回 200，响应体中 `errcode`/`code` 非零同样判定为失败并进入重试，避免告警静默丢失
 - **THRESHOLD 阈值规则**（系统资源类）示例：
 
@@ -214,7 +216,7 @@ scrape_configs:
 | -------------------------------------- | ------- | --------------------------------- |
 | `network_monitor_up`                   | gauge   | 最近一次检查是否可用（1/0）       |
 | `network_monitor_checks_total`         | counter | 检查总次数（`status=ok/failed`）  |
-| `network_monitor_last_response_time_milliseconds` | gauge | 最近一次检查耗时       |
+| `network_monitor_last_response_time_milliseconds` | gauge | 最近一次检查耗时（ICMP 为链路 RTT，其余为探测耗时）  |
 | `network_monitor_last_check_timestamp_seconds`    | gauge | 最近一次检查时间       |
 | `network_monitor_check_duration_seconds`          | histogram | 检查耗时分布（12个桶：5ms~30s，可用 `histogram_quantile()` 算分位数） |
 | `network_monitor_alerting`             | gauge   | 是否处于告警抑制状态（查库实时）  |
@@ -226,7 +228,7 @@ scrape_configs:
 Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原生 HTML/JS，
 构建期打包进二进制（`include_str!`），无任何前端构建链与外部资源，离线可用：
 
-- **状态总览**：全部监控的可用/不可用/未检查徽章、告警中标记、耗时与最近检查时间，5 秒自动刷新
+- **状态总览**：全部监控的可用/不可用/未检查徽章、告警中标记、耗时与最近检查时间，5 秒自动刷新（聚合查询为固定两次 DB 往返，与监控数无关，避免逐监控 N+1）
 - **手动执行**：对任意监控立即执行一次检查（走与定时任务相同的指标/持久化链路），返回完整结果详情
 - **历史结果**：按监控查看最近 15 条检查记录
 - **配置管理**：JSON 方式新建监控（含告警配置示例模板）、启停、删除
@@ -253,6 +255,8 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 - **保留策略**：每 24 小时清理 `RESULT_RETENTION_DAYS` 天前的过期结果
 - **游标分页**：`/api/results` 支持 keyset 分页（`cursor=true`，翻页带 `before_id=<上页末条id>`），按 `id < before_id` 直接命中主键索引，翻页代价与页码无关；OFFSET 分页在保留期内百万行结果上深翻页会退化为近全表扫描，大数据量翻页应改用游标模式
 - **优雅关停**：Ctrl+C / SIGTERM 后停止接受请求、停掉全部监控任务并完成最终攒批落库（同步 DB 调用均在阻塞线程池执行，不卡 runtime）
+- **连接池取连接不 panic**：连接池耗尽/超时时返回 `Err` 经 `?` 汇入各仓库函数的错误路径（此前 `expect` 会把取连接失败升级为 panic），配合上层已有的降级逻辑（flush 逐条重试、告警状态恢复失败退化为内存态）
+- **攒批 panic 数据丢失显式化**：`spawn_blocking` 落库任务若 panic，明确记录未写入的条数与错误（提示可据 CSV 日志人工核对），不静默吞掉
 
 ## Docker 部署
 
@@ -277,7 +281,7 @@ docker compose up -d
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（91个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
+cargo test          # 运行全部测试（142个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```
