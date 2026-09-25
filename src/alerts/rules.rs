@@ -139,14 +139,10 @@ pub(super) fn evaluate_threshold(
         // 结果类型与metric不匹配（如cpu规则配在HTTP监控上）：跳过而不是误判
         _ => return None,
     };
-    let hit = match th.op.as_str() {
-        ">" => value > th.value,
-        ">=" => value >= th.value,
-        "<" => value < th.value,
-        "<=" => value <= th.value,
-        "==" | "=" => (value - th.value).abs() < f64::EPSILON,
+    let hit = match crate::tools_types::CompareOp::parse(&th.op) {
+        Some(op) => op.apply(value, th.value),
         // 非法比较符直接跳过（API侧已校验，防御JSON直写数据库的场景）
-        _ => false,
+        None => false,
     };
     if hit {
         Some(format!(

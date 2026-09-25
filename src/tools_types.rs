@@ -60,22 +60,29 @@ pub enum MonitorType {
     Unknown,
 }
 
+impl MonitorType {
+    // 大写类型名：Display 与各处日志/消息统一引用此处，避免与 serde(rename) 漂移
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MonitorType::Icmp => "ICMP",
+            MonitorType::Tcp => "TCP",
+            MonitorType::Udp => "UDP",
+            MonitorType::Dns => "DNS",
+            MonitorType::Http => "HTTP",
+            MonitorType::Ftp => "FTP",
+            MonitorType::Traceroute => "TRACEROUTE",
+            MonitorType::Cpu => "CPU",
+            MonitorType::Memory => "MEMORY",
+            MonitorType::Disk => "DISK",
+            MonitorType::Process => "PROCESS",
+            MonitorType::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 impl std::fmt::Display for MonitorType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
-            MonitorType::Icmp => write!(f, "ICMP"),
-            MonitorType::Tcp => write!(f, "TCP"),
-            MonitorType::Udp => write!(f, "UDP"),
-            MonitorType::Dns => write!(f, "DNS"),
-            MonitorType::Http => write!(f, "HTTP"),
-            MonitorType::Ftp => write!(f, "FTP"),
-            MonitorType::Traceroute => write!(f, "TRACEROUTE"),
-            MonitorType::Cpu => write!(f, "CPU"),
-            MonitorType::Memory => write!(f, "MEMORY"),
-            MonitorType::Disk => write!(f, "DISK"),
-            MonitorType::Process => write!(f, "PROCESS"),
-            MonitorType::Unknown => write!(f, "UNKNOWN"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -371,6 +378,34 @@ mod notify_type_tests {
     }
 }
 
+#[cfg(test)]
+mod compare_op_tests {
+    use super::CompareOp;
+
+    #[test]
+    fn parse_accepts_all_legal_ops_and_alias() {
+        assert_eq!(CompareOp::parse(">"), Some(CompareOp::Gt));
+        assert_eq!(CompareOp::parse(">="), Some(CompareOp::Ge));
+        assert_eq!(CompareOp::parse("<"), Some(CompareOp::Lt));
+        assert_eq!(CompareOp::parse("<="), Some(CompareOp::Le));
+        assert_eq!(CompareOp::parse("=="), Some(CompareOp::Eq));
+        assert_eq!(CompareOp::parse("="), Some(CompareOp::Eq), "= 是 == 的别名");
+        assert_eq!(CompareOp::parse("~"), None);
+        assert_eq!(CompareOp::parse(""), None);
+    }
+
+    #[test]
+    fn apply_matches_operator_semantics() {
+        assert!(CompareOp::Gt.apply(90.0, 80.0));
+        assert!(!CompareOp::Gt.apply(80.0, 80.0));
+        assert!(CompareOp::Ge.apply(80.0, 80.0));
+        assert!(CompareOp::Lt.apply(5.0, 10.0));
+        assert!(CompareOp::Le.apply(10.0, 10.0));
+        assert!(CompareOp::Eq.apply(50.0, 50.0));
+        assert!(!CompareOp::Eq.apply(50.0, 50.1));
+    }
+}
+
 /// 告警规则类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AlertRuleTypes {
@@ -402,8 +437,46 @@ pub struct NotifyCondition {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThresholdCondition {
     pub metric: String, // cpu / memory / disk（使用率）/ available_bytes / process
-    pub op: String,     // > >= < <= ==
+    pub op: String,     // > >= < <= ==（合法性与比较语义集中在 CompareOp）
     pub value: f64,     // 阈值
+}
+
+/// 阈值比较符：合法值集合与比较语义的唯一来源。
+/// 保持 ThresholdCondition.op 为 String（兼容库中既有 config_json，不改变反序列化行为），
+/// 校验（validation）与判定（rules::evaluate_threshold）都经此枚举，消除此前散落两处的
+/// 字符串字面量 match。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Eq,
+}
+
+impl CompareOp {
+    /// 解析比较符；非法值返回 None（"=" 视作 "=="）
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            ">" => Some(CompareOp::Gt),
+            ">=" => Some(CompareOp::Ge),
+            "<" => Some(CompareOp::Lt),
+            "<=" => Some(CompareOp::Le),
+            "==" | "=" => Some(CompareOp::Eq),
+            _ => None,
+        }
+    }
+
+    /// 判定 lhs op rhs 是否成立（Eq 用 f64::EPSILON 容差）
+    pub fn apply(&self, lhs: f64, rhs: f64) -> bool {
+        match self {
+            CompareOp::Gt => lhs > rhs,
+            CompareOp::Ge => lhs >= rhs,
+            CompareOp::Lt => lhs < rhs,
+            CompareOp::Le => lhs <= rhs,
+            CompareOp::Eq => (lhs - rhs).abs() < f64::EPSILON,
+        }
+    }
 }
 
 /// HTTP请求体配置（JSON配置文件/API请求体中的表达形式）

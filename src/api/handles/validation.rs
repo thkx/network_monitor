@@ -97,7 +97,7 @@ pub fn validate_config(entry: &SelfDefineMonitorConfig) -> Result<(), actix_web:
                         "THRESHOLD 规则必须配置 threshold 条件",
                     ));
                 };
-                if !matches!(th.op.as_str(), ">" | ">=" | "<" | "<=" | "==" | "=") {
+                if crate::tools_types::CompareOp::parse(&th.op).is_none() {
                     return Err(actix_web::error::ErrorBadRequest(format!(
                         "THRESHOLD 规则的 op 非法: {:?}（支持 > >= < <= ==）",
                         th.op
