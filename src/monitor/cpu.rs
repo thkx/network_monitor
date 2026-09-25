@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, CpuMonitorResult, MonitorConfig};
+use crate::domain::{CheckResultDetail, CpuMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
 use std::sync::Mutex;
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, System};
@@ -68,7 +68,7 @@ impl Monitor for CpuMonitor {
 mod tests {
     use super::{CpuMonitor, MINIMUM_CPU_UPDATE_INTERVAL, Monitor};
     use crate::domain::MonitorType;
-    use crate::monitor::types::{CheckResultDetail, MonitorConfig, MonitorConfigDetail};
+    use crate::domain::{CheckResultDetail, MonitorConfig, MonitorConfigDetail};
 
     fn cpu_config() -> MonitorConfig {
         MonitorConfig {
@@ -76,7 +76,7 @@ mod tests {
             interval: Some(60),
             monitor_type: MonitorType::Cpu,
             timeout: 5000,
-            details: MonitorConfigDetail::Cpu(crate::monitor::types::CpuMonitorConfig {}),
+            details: MonitorConfigDetail::Cpu(crate::domain::CpuMonitorConfig {}),
         }
     }
 

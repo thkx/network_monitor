@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, DiskInfo, DiskMonitorResult, MonitorConfig};
+use crate::domain::{CheckResultDetail, DiskInfo, DiskMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
 use sysinfo::Disks;
 

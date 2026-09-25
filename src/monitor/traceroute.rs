@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, MonitorConfig, TracerouteMonitorResult};
+use crate::domain::{CheckResultDetail, MonitorConfig, TracerouteMonitorResult};
 use crate::domain::MonitorType;
 use std::process::Stdio;
 use std::time::Duration;

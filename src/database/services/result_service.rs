@@ -1,6 +1,6 @@
 use crate::database::models::{CheckResultModel, CheckResultModelInsert};
 use crate::database::repositories::result_repo::CheckResultRepository;
-use crate::monitor::types::CheckResult;
+use crate::domain::CheckResult;
 use diesel::result::Error;
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ mod tests {
     use crate::database::repositories::result_repo::CheckResultRepository;
     use crate::database::repositories::test_support::create_test_monitor;
     use crate::domain::MonitorType;
-    use crate::monitor::types::{CheckResult, CheckResultDetail, IcmpMonitorResult};
+    use crate::domain::{CheckResult, CheckResultDetail, IcmpMonitorResult};
     use std::sync::Arc;
 
     // build_insert是单条与批量共用的唯一构造点：验证check_id与完整结果详情

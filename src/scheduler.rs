@@ -14,7 +14,7 @@ use crate::database::pool::SqlitePool;
 use crate::database::services::monitor_service::MonitorService;
 use crate::domain::{MonitorDefinition, display_name};
 use crate::monitor::MonitorFactory;
-use crate::monitor::types::MonitorConfig;
+use crate::domain::MonitorConfig;
 
 pub struct Scheduler {
     tasks: HashMap<i32, JoinHandle<()>>,

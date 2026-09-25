@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, MonitorConfig, TcpMonitorResult};
+use crate::domain::{CheckResultDetail, MonitorConfig, TcpMonitorResult};
 use crate::domain::MonitorType;
 use crate::tools::parse_host_port;
 use std::time::Instant;
@@ -57,7 +57,7 @@ impl Monitor for TcpMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::types::{MonitorConfig, MonitorConfigDetail, TcpMonitorConfig};
+    use crate::domain::{MonitorConfig, MonitorConfigDetail, TcpMonitorConfig};
 
     // 连接超时对齐 config.timeout：连一个不可路由地址（RFC 5737 TEST-NET-1），
     // timeout=1000 时应在远小于旧硬编码5秒内返回失败（证明配置生效）。

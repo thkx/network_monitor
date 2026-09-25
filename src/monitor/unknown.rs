@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, MonitorConfig, MonitorConfigDetail, UnknownMonitorResult};
+use crate::domain::{CheckResultDetail, MonitorConfig, MonitorConfigDetail, UnknownMonitorResult};
 use crate::domain::MonitorType;
 
 pub struct UnknownMonitor {}

@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, MemoryMonitorResult, MonitorConfig};
+use crate::domain::{CheckResultDetail, MemoryMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
 use std::sync::Mutex;
 use sysinfo::System;

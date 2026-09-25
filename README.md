@@ -320,7 +320,7 @@ src/
 │   └── services/        # 业务服务层
 ├── monitor/             # 12种监控引擎（策略模式 + 工厂）
 ├── tools/               # HTTP/TLS 探测、SMTP邮件（lettre封装）、重试策略
-├── domain/              # 全局领域类型（result 结果 / config 输入配置 / alert 告警通知）
+├── domain/              # 全局领域类型（result 结果 / config 输入配置 / alert 告警通知 / check 运行时监控类型）
 └── csv_logger.rs        # CSV 日志（按日滚动 + 常驻写句柄，check_id 与数据库关联）
 ```
 

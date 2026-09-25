@@ -1,6 +1,6 @@
 use crate::alerts::AlertsEngine;
 use crate::monitor::Monitor;
-use crate::monitor::types::{CheckResult, MonitorConfig};
+use crate::domain::{CheckResult, MonitorConfig};
 
 use tokio::time::{Duration, interval};
 // 引入mpsc 通道概念 用于创建通道 并将接收端返回给调用者

@@ -43,7 +43,7 @@ use args::{Args, Commands};
 // 监控引擎模块（基于策略模式+工厂模式的不同类型监控系统）
 mod monitor;
 use monitor::MonitorFactory;
-use monitor::types::{CheckResult, CheckResultDetail, MonitorConfig};
+use domain::{CheckResult, CheckResultDetail, MonitorConfig};
 
 // 工具模块
 mod tools;

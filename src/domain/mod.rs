@@ -4,9 +4,11 @@
 //   - config: 监控输入配置、监控类型、HTTP 请求相关类型
 //   - alert:  告警/通知配置、渠道类型（NotifyType）与阈值比较符（CompareOp）
 mod alert;
+mod check;
 mod config;
 mod result;
 
 pub use alert::*;
+pub use check::*;
 pub use config::*;
 pub use result::*;

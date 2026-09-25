@@ -1,9 +1,7 @@
-pub mod types;
 use crate::domain::MonitorType; // 全局通用的类型定义模块
 
-// 引进特征对象：CheckResultDetail/MonitorConfig 在本模块的 types 子模块（crate::monitor::types），
-// 注意与 crate::domain（全局类型）区分——此处必须用 self::types，不能写 super::types
-use self::types::{CheckResultDetail, MonitorConfig};
+// 运行时监控类型（CheckResultDetail/MonitorConfig）现统一归于 crate::domain（原 monitor::types 已并入）
+use crate::domain::{CheckResultDetail, MonitorConfig};
 // 定义监控类型的 trait 后续的不同的监控类型都实现这个 trait
 // 在这里添加 Send 和 Sync 作为父 trait
 // Send: 允许在线程间移动

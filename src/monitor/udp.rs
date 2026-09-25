@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, MonitorConfig, UdpMonitorResult};
+use crate::domain::{CheckResultDetail, MonitorConfig, UdpMonitorResult};
 use crate::domain::MonitorType;
 use crate::tools::parse_host_port;
 use std::time::Instant;
@@ -168,7 +168,7 @@ mod tests {
         use super::UdpMonitor;
         use crate::domain::MonitorType;
         use crate::monitor::Monitor;
-        use crate::monitor::types::{
+        use crate::domain::{
             CheckResultDetail, MonitorConfig, MonitorConfigDetail, UdpMonitorConfig,
         };
 

@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, FtpMonitorResult, MonitorConfig};
+use crate::domain::{CheckResultDetail, FtpMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
 use crate::tools::parse_host_port;
 use std::time::{Duration, Instant};
@@ -161,7 +161,7 @@ fn parse_ftp_code(buf: &[u8]) -> Option<u16> {
 mod tests {
     use super::{FtpMonitor, MonitorConfig, MonitorType, parse_ftp_code};
     use crate::monitor::Monitor;
-    use crate::monitor::types::CheckResultDetail;
+    use crate::domain::CheckResultDetail;
 
     #[test]
     fn ftp_reply_parser_handles_single_and_multiline() {
@@ -210,8 +210,8 @@ mod tests {
             interval: Some(60),
             monitor_type: MonitorType::Ftp,
             timeout: 5000,
-            details: crate::monitor::types::MonitorConfigDetail::Ftp(
-                crate::monitor::types::FtpMonitorConfig {},
+            details: crate::domain::MonitorConfigDetail::Ftp(
+                crate::domain::FtpMonitorConfig {},
             ),
         }
     }

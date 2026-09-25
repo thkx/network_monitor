@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{CheckResultDetail, IcmpMonitorResult, MonitorConfig};
+use crate::domain::{CheckResultDetail, IcmpMonitorResult, MonitorConfig};
 use crate::domain::MonitorType;
 use std::process::Stdio;
 use std::time::{Duration, Instant};

@@ -300,7 +300,7 @@ pub async fn run_monitor_once(
         .unwrap_or_else(|| crate::domain::display_name(&entry));
     // 未配置interval时使用--interval默认值（与定时调度同源）
     let interval_default = Arc::unwrap_or_clone(default_interval.into_inner());
-    let config = crate::monitor::types::MonitorConfig::from_entry(&entry, interval_default);
+    let config = crate::domain::MonitorConfig::from_entry(&entry, interval_default);
     let monitor = MonitorFactory::create_monitor(config.monitor_type);
     // 单次执行：复用Once模式的执行封装，结果完整返回给前端
     let mut rx = AsyncMonitor::create_once_monitoring(monitor, config).await;

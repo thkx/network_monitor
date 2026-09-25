@@ -1,17 +1,14 @@
-//  类型声明模块
-// MonitorConfig::from_entry：JSON配置项 → 运行时监控配置的唯一转换点
-// （此前住在main.rs，导致api/scheduler对crate root的逆向依赖）
+//  运行时监控类型（domain/check）：监控输入配置与探测结果的运行时表示
+// MonitorConfig::from_entry：JSON配置项（MonitorDefinition）→ 运行时监控配置的唯一转换点
+// （由 monitor/types.rs 并入 domain，与其余领域类型同处 crate::domain）
 
 use crate::domain::{
-    HttpBody, HttpBodyConfig, HttpMethodTypes, HttpMonitorResult, MonitorType,
-    MonitorDefinition,
+    ContentVerificationRulesSingle, HttpBody, HttpBodyConfig, HttpMethodTypes, HttpMonitorResult,
+    MonitorDefinition, MonitorType,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-
-// 内容验证规则结构体，全局统一定义在 types 中，这里直接重导出使用
-pub use crate::domain::ContentVerificationRulesSingle;
 
 // 定义核心的监控配置参数结构体
 #[derive(Debug, Clone)]

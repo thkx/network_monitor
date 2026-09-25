@@ -1,5 +1,5 @@
 use super::Monitor;
-use super::types::{
+use crate::domain::{
     CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail, UnknownMonitorResult,
 };
 use crate::domain::{
@@ -450,7 +450,7 @@ mod tests {
         ContentVerificationRules, ContentVerificationRulesSingle, HttpMethodTypes, MonitorType,
     };
     use crate::monitor::Monitor;
-    use crate::monitor::types::{
+    use crate::domain::{
         CheckResultDetail, HttpMonitorConfig, MonitorConfig, MonitorConfigDetail,
     };
 
