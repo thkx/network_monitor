@@ -36,9 +36,11 @@ impl Monitor for FtpMonitor {
         };
         let start = Instant::now();
         let mut result = FtpMonitorResult::default();
-        // 带超时地发起TCP连接（超时时间5秒）
+        // 连接与每步读取的超时对齐 config.timeout（毫秒；下限1秒防配置0立即超时）
+        // 此前硬编码连接5秒/单次读3秒，配置的超时对FTP不生效
+        let step_timeout = Duration::from_millis(config.timeout.max(1000));
         let connect_res = tokio::time::timeout(
-            Duration::from_secs(5),
+            step_timeout,
             TcpStream::connect((host.as_str(), port)),
         )
         .await;
@@ -46,7 +48,7 @@ impl Monitor for FtpMonitor {
             result.connected = true;
             let mut buf = Vec::with_capacity(256);
             // 步骤1：欢迎横幅（合法FTP服务以2xx响应码开始）
-            if let Ok(code) = read_ftp_reply(&mut stream, &mut buf).await {
+            if let Ok(code) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await {
                 result.last_code = Some(code);
                 result.banner = Some(String::from_utf8_lossy(&buf).trim().to_string());
                 // 横幅字节清空：read_ftp_reply对累积缓冲解析，残留横幅会被误当下一步响应
@@ -54,7 +56,7 @@ impl Monitor for FtpMonitor {
                 if code == 220 {
                     // 步骤2：USER anonymous
                     if send_cmd(&mut stream, "USER anonymous").await.is_ok()
-                        && let Ok(c1) = read_ftp_reply(&mut stream, &mut buf).await
+                        && let Ok(c1) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await
                     {
                         result.last_code = Some(c1);
                         result.handshake_ok = true;
@@ -67,7 +69,7 @@ impl Monitor for FtpMonitor {
                                 if send_cmd(&mut stream, "PASS ftp-monitor@example.com")
                                     .await
                                     .is_ok()
-                                    && let Ok(c2) = read_ftp_reply(&mut stream, &mut buf).await
+                                    && let Ok(c2) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await
                                 {
                                     result.last_code = Some(c2);
                                     result.logged_in = (200..=299).contains(&c2);
@@ -95,8 +97,12 @@ async fn send_cmd(stream: &mut TcpStream, cmd: &str) -> std::io::Result<()> {
 }
 
 // 读取一条完整的FTP回复（多行回复读至终结行），返回响应码；
-// 读到的原始字节累积进buf供横幅展示。单次读超时3秒。
-async fn read_ftp_reply(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<u16, String> {
+// 读到的原始字节累积进buf供横幅展示。单次读超时由调用方传入（对齐config.timeout）。
+async fn read_ftp_reply(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    step_timeout: Duration,
+) -> Result<u16, String> {
     let mut chunk = [0u8; 512];
     loop {
         if let Some(code) = parse_ftp_code(buf) {
@@ -105,11 +111,11 @@ async fn read_ftp_reply(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<u16
         if buf.len() > 8 * 1024 {
             return Err("FTP回复过长".to_string());
         }
-        match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut chunk)).await {
+        match tokio::time::timeout(step_timeout, stream.read(&mut chunk)).await {
             Ok(Ok(0)) => return Err("连接在对端关闭前未给出完整FTP回复".to_string()),
             Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
             Ok(Err(e)) => return Err(format!("读取FTP回复失败: {}", e)),
-            Err(_) => return Err("等待FTP回复超时（3秒）".to_string()),
+            Err(_) => return Err("等待FTP回复超时".to_string()),
         }
     }
 }
