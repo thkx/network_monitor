@@ -169,7 +169,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | `METRICS_TOKEN`         | （空=metrics开放）| 配置后 `/metrics` 需要 `Bearer` 令牌   |
 | `BIND_ADDR`             | `127.0.0.1`       | Web API 监听地址；容器/局域网部署设 `0.0.0.0` |
 | `LOG_DIR`               | `./logs`          | 文件日志目录；容器部署应指向持久卷         |
-| `CSV_PATH`              | `./monitor_log.csv` | CSV 日志路径；容器部署应指向持久卷       |
+| `CSV_PATH`              | `./monitor_log.csv` | CSV 日志基础名；实际按日滚动为 `monitor_log-YYYY-MM-DD.csv`，容器部署应指向持久卷 |
 
 ## 认证
 
@@ -188,6 +188,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 - **控制台**：人类可读格式（本地时间 + 级别 + 模块）
 - **文件**：`logs/network_monitor.log` 按日滚动，无 ANSI 颜色码，适合 grep/采集
+- **CSV**：每次检查一行（时间/检查ID/网址/状态/响应时间/状态码），**按日滚动**为 `monitor_log-YYYY-MM-DD.csv`（`CSV_PATH` 作为基础名，日期插到扩展名之前）；写句柄常驻，仅跨天时重开，逐条 flush 保证持久性
 
 级别约定：启动/调度/告警发送成功为 `info`；**检查不可用、配置异常为 `warn`**；每次检查的可
 用结果与完整字段（check_id/monitor/response_time_ms/status_code）为 `debug`；持久化、通知发
@@ -306,7 +307,7 @@ src/
 ├── monitor/             # 12种监控引擎（策略模式 + 工厂）
 ├── tools/               # HTTP/TLS 探测、SMTP邮件（lettre封装）、重试策略
 ├── domain/              # 全局领域类型（result 结果 / config 输入配置 / alert 告警通知）
-└── csv_logger.rs        # CSV 日志（check_id 与数据库关联）
+└── csv_logger.rs        # CSV 日志（按日滚动 + 常驻写句柄，check_id 与数据库关联）
 ```
 
 ### 设计要点
