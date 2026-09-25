@@ -16,23 +16,20 @@ impl MonitorService {
     }
     // 这里的话 我们没有特殊的逻辑 所以比较简单
     // 如果后续 我们把告警规则、告警配置单独拎出来的话 对应的业务逻辑就需要在这里进行处理
-    pub fn get_monitors_by_enabled(
+    // 列表查询：可选按启停状态、可选按分组标签筛选
+    pub fn list_monitors(
         &self,
-        enabled_flag: bool,
+        enabled: Option<bool>,
+        tag: Option<&str>,
         page: i64,
         page_size: i64,
     ) -> Result<(Vec<MonitorConfigModel>, i64), Error> {
-        self.repo
-            .get_monitors_by_enabled(enabled_flag, page, page_size)
+        self.repo.list_monitors(enabled, tag, page, page_size)
     }
 
-    // 分页查询全部监控配置（不筛选启停状态，供列表页展示禁用项）
-    pub fn get_monitors_paged(
-        &self,
-        page: i64,
-        page_size: i64,
-    ) -> Result<(Vec<MonitorConfigModel>, i64), Error> {
-        self.repo.get_monitors_paged(page, page_size)
+    // 库中出现过的全部非空分组标签（去重升序），供列表页筛选下拉
+    pub fn get_distinct_tags(&self) -> Result<Vec<String>, Error> {
+        self.repo.get_distinct_tags()
     }
 
     // 启用/禁用监控配置（其余字段保持不变）

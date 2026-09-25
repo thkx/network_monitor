@@ -142,6 +142,9 @@ pub struct SelfDefineMonitorConfig {
     pub timeout: Option<u64>, // HTTP监控超时时间，单位毫秒
     #[serde(default)]
     pub description: Option<String>, // 描述信息
+    /// 分组标签（可选）：用于列表页按业务分组筛选（?tag=）；空/缺省为不分组
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 // 监控项的展示名称：优先使用target，没有target时（如CPU/MEMORY/DISK监控）使用监控类型名

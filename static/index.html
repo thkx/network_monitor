@@ -73,6 +73,11 @@
     <label><input type="checkbox" id="autoRefresh" checked> 自动刷新（5s）</label>
     <button onclick="refresh(true)">手动刷新</button>
     <button onclick="openNewPanel()">＋ 新建监控</button>
+    <label>分组
+      <select id="tagFilter" onchange="applyTagFilter()">
+        <option value="">全部</option>
+      </select>
+    </label>
     <span id="updated" class="muted"></span>
     <button onclick="logout()" style="margin-left:auto">⎋ 退出登录</button>
   </div>
@@ -80,7 +85,7 @@
   <table id="statusTable">
     <thead>
       <tr>
-        <th>状态</th><th>名称</th><th>类型</th><th>目标</th>
+        <th>状态</th><th>名称</th><th>类型</th><th>目标</th><th>分组</th>
         <th>耗时</th><th>最近检查</th><th>操作</th>
       </tr>
     </thead>
@@ -135,7 +140,7 @@ const API = {
 };
 
 const EXAMPLE = {
-  target: 'https://example.com', monitor_type: 'HTTP', interval: 60,
+  target: 'https://example.com', monitor_type: 'HTTP', interval: 60, tag: 'prod',
   alert_rules: {
     notify_type: 'FEISHU',
     notify_config: { webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' },
@@ -202,6 +207,30 @@ async function refresh(notify) {
 }
 
 function render(items) {
+  lastItems = items || [];
+  syncTagOptions(lastItems);
+  renderRows();
+  document.getElementById('updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
+}
+
+// 保存最近一次状态数据 + 当前分组筛选，供客户端按 tag 过滤（/api/status 已全量返回）
+let lastItems = [];
+function currentTag() { return document.getElementById('tagFilter').value; }
+function applyTagFilter() { renderRows(); }
+
+// 依据当前数据里出现过的分组标签刷新下拉选项（保留当前选择，选中项消失则回退到"全部"）
+function syncTagOptions(items) {
+  const sel = document.getElementById('tagFilter');
+  const prev = sel.value;
+  const tags = [...new Set(items.map(m => m.tag).filter(t => t != null && t !== ''))].sort();
+  sel.innerHTML = '<option value="">全部</option>' +
+    tags.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  sel.value = tags.includes(prev) ? prev : '';
+}
+
+function renderRows() {
+  const tag = currentTag();
+  const items = tag ? lastItems.filter(m => m.tag === tag) : lastItems;
   const tb = document.querySelector('#statusTable tbody');
   tb.innerHTML = '';
   for (const m of items) {
@@ -216,6 +245,7 @@ function render(items) {
       <td>${esc(m.name)}</td>
       <td><span class="muted">${esc(m.monitor_type)}</span></td>
       <td class="muted">${esc(m.target)}</td>
+      <td class="muted">${m.tag ? esc(m.tag) : '—'}</td>
       <td>${m.last_response_time != null ? m.last_response_time + ' ms' : '—'}</td>
       <td class="muted">${m.last_check_at || '—'}</td>
       <td class="actions">
@@ -227,7 +257,6 @@ function render(items) {
       </td>`;
     tb.appendChild(tr);
   }
-  document.getElementById('updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
 }
 
 // 事件委托：表格内按钮动作一律通过data-act/data-id驱动，动态值不再拼进内联onclick

@@ -24,6 +24,7 @@ pub struct MonitorStatusItem {
     pub last_response_time: Option<i32>,
     pub last_check_at: Option<String>,
     pub alerting: bool, // 是否处于"已告警未恢复"状态
+    pub tag: Option<String>, // 分组标签（用于列表页筛选）
 }
 
 // GET /api/status
@@ -74,6 +75,7 @@ pub async fn get_console_status(
                         .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                 }),
                 alerting: alert_map.get(&m.id).copied().unwrap_or(false),
+                tag: m.tag.clone(),
             }
         })
         .collect();

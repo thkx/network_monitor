@@ -23,14 +23,17 @@ pub async fn get_all_monitors(
     query: web::Query<PaginationParams>,        // 分页参数对象
 ) -> Result<HttpResponse, actix_web::Error> {
     let (no, size) = clamp_pagination(query.page_no, query.page_size);
-    // enabled参数可选：此前硬编码只查启用项，禁用的配置在列表里"消失"
-    let (monitors, total) = match query.enabled {
-        Some(flag) => monitor_service.get_monitors_by_enabled(flag, no, size),
-        None => monitor_service.get_monitors_paged(no, size),
-    }
-    .map_err(|e| {
-        actix_web::error::ErrorInternalServerError(format!("Failed to get monitors: {}", e))
-    })?;
+    // enabled 可选筛选启停；tag 可选按分组标签筛选（空串视作不筛选）
+    let tag = query
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (monitors, total) = monitor_service
+        .list_monitors(query.enabled, tag, no, size)
+        .map_err(|e| {
+            actix_web::error::ErrorInternalServerError(format!("Failed to get monitors: {}", e))
+        })?;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "OK".to_string(),
@@ -40,6 +43,18 @@ pub async fn get_all_monitors(
             page_no: no,
             page_size: size,
         },
+    }))
+}
+
+// GET /api/monitors/tags：库中出现过的全部分组标签（去重升序），供列表页筛选下拉
+pub async fn get_monitor_tags(
+    monitor_service: web::Data<MonitorService>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let tags = monitor_service.get_distinct_tags().map_err(internal_error)?;
+    Ok(HttpResponse::Ok().json(DefaultResponseObj {
+        code: 200,
+        message: "OK".to_string(),
+        data: tags,
     }))
 }
 
@@ -160,7 +175,8 @@ pub async fn update_monitor(
         timeout_ms: Some(entry.timeout.unwrap_or(5000) as i32),
         config_json: serde_json::to_string(&entry).ok(),
         enabled: None, // 更新时保持启用状态不变
-        tag: None,
+        // 分组标签随更新一并写入（与create一致，空串归一为None）
+        tag: crate::database::services::normalize_tag(entry.tag.as_deref()),
     };
     let affected = match monitor_service.update_monitor(id, &update) {
         Ok(n) => n,
@@ -328,7 +344,7 @@ pub async fn run_monitor_once(
 
 #[cfg(test)]
 mod tests {
-    use super::{create_monitor, update_monitor};
+    use super::{create_monitor, get_all_monitors, get_monitor_tags, update_monitor};
     use crate::api::handles::response::DefaultResponseObj;
     use crate::database::pool::test_pool;
     use crate::database::repositories::monitor_repo::MonitorRepository;
@@ -336,6 +352,67 @@ mod tests {
     use crate::scheduler::Scheduler;
     use actix_web::web;
     use std::sync::{Arc, Mutex};
+
+    // tag 全链路：创建携带 tag → 列表 ?tag= 精确筛选 → /monitors/tags 去重列出
+    #[actix_web::test]
+    async fn tag_create_filter_and_tags_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        let scheduler = Arc::new(Mutex::new(Scheduler::new(pool.clone(), 5)));
+
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(web::Data::new(monitor_service.clone()))
+                .app_data(web::Data::new(scheduler.clone()))
+                .app_data(web::Data::new(5u64))
+                .route("/api/monitors", web::post().to(create_monitor))
+                .route("/api/monitors", web::get().to(get_all_monitors))
+                .route("/api/monitors/tags", web::get().to(get_monitor_tags)),
+        )
+        .await;
+
+        let post = |body: &'static str| {
+            actix_web::test::TestRequest::post()
+                .uri("/api/monitors")
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(body.to_string())
+                .to_request()
+        };
+        for body in [
+            r#"{"target":"https://a.example.com","monitor_type":"HTTP","tag":"prod"}"#,
+            r#"{"target":"https://b.example.com","monitor_type":"HTTP","tag":"prod"}"#,
+            r#"{"target":"https://c.example.com","monitor_type":"HTTP","tag":"staging"}"#,
+        ] {
+            let resp = actix_web::test::call_service(&app, post(body)).await;
+            assert_eq!(resp.status(), 200, "创建应成功");
+        }
+
+        // ?tag=prod 只回两条
+        let resp = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::get()
+                .uri("/api/monitors?tag=prod")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: DefaultResponseObj<serde_json::Value> =
+            actix_web::test::read_body_json(resp).await;
+        assert_eq!(body.data["total"], 2, "prod 应筛出两条");
+
+        // /monitors/tags 去重升序
+        let resp = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::get()
+                .uri("/api/monitors/tags")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: DefaultResponseObj<Vec<String>> = actix_web::test::read_body_json(resp).await;
+        assert_eq!(body.data, vec!["prod".to_string(), "staging".to_string()]);
+    }
 
     // 重复创建：name由target生成且库里有唯一约束，冲突必须映射409而非500
     #[actix_web::test]

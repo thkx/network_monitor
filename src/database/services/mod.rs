@@ -31,6 +31,14 @@ pub fn build_monitor_insert(
         timeout_ms: entry.timeout.unwrap_or(5000) as i32,
         config_json: serde_json::to_string(entry).ok(),
         enabled: 1,
-        tag: None,
+        // 分组标签：去除首尾空白，空串归一为 None（不分组）
+        tag: normalize_tag(entry.tag.as_deref()),
     }
+}
+
+/// 分组标签归一化：trim 后为空视作未分组（None），避免空串/空白污染筛选下拉
+pub fn normalize_tag(tag: Option<&str>) -> Option<String> {
+    tag.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }

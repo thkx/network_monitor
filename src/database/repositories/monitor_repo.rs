@@ -13,26 +13,35 @@ impl MonitorRepository {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         MonitorRepository { pool }
     }
-    pub fn get_monitors_by_enabled(
+    // 列表查询：可选按启停状态、可选按分组标签筛选，分页返回（列表 + 总数）。
+    // 用 into_boxed() 动态拼接筛选，避免 enabled×tag 组合各写一遍。
+    pub fn list_monitors(
         &self,
-        enabled_flag: bool,
+        enabled: Option<bool>,
+        tag: Option<&str>,
         page: i64,
         page_size: i64,
     ) -> Result<(Vec<MonitorConfigModel>, i64), Error> {
-        // 获取当前对数据库的链接
         let mut conn = get_connection(&self.pool)?;
         let page_no = page.max(1);
         let page_sz = page_size.max(1);
         let offset = (page_no - 1) * page_sz;
-        let enabled_v = if enabled_flag { 1 } else { 0 };
 
-        let total: i64 = monitor_config::table
-            .filter(monitor_config::enabled.eq(enabled_v))
-            .count()
-            .get_result(&mut conn)?;
-        // 执行数据库操作
-        let results = monitor_config::table
-            .filter(monitor_config::enabled.eq(enabled_v))
+        let mut count_q = monitor_config::table.into_boxed();
+        let mut list_q = monitor_config::table.into_boxed();
+        if let Some(flag) = enabled {
+            let v = if flag { 1 } else { 0 };
+            count_q = count_q.filter(monitor_config::enabled.eq(v));
+            list_q = list_q.filter(monitor_config::enabled.eq(v));
+        }
+        if let Some(t) = tag {
+            let t = t.to_string();
+            count_q = count_q.filter(monitor_config::tag.eq(t.clone()));
+            list_q = list_q.filter(monitor_config::tag.eq(t));
+        }
+
+        let total: i64 = count_q.count().get_result(&mut conn)?;
+        let results = list_q
             .order(monitor_config::id.desc())
             .limit(page_sz)
             .offset(offset)
@@ -40,23 +49,15 @@ impl MonitorRepository {
         Ok((results, total))
     }
 
-    // 分页查询全部监控配置（不筛选启停状态）
-    pub fn get_monitors_paged(
-        &self,
-        page: i64,
-        page_size: i64,
-    ) -> Result<(Vec<MonitorConfigModel>, i64), Error> {
+    // 查询库中出现过的全部非空分组标签（去重、升序），供列表页筛选下拉
+    pub fn get_distinct_tags(&self) -> Result<Vec<String>, Error> {
         let mut conn = get_connection(&self.pool)?;
-        let page_no = page.max(1);
-        let page_sz = page_size.max(1);
-        let offset = (page_no - 1) * page_sz;
-        let total: i64 = monitor_config::table.count().get_result(&mut conn)?;
-        let results = monitor_config::table
-            .order(monitor_config::id.desc())
-            .limit(page_sz)
-            .offset(offset)
-            .load::<MonitorConfigModel>(&mut conn)?;
-        Ok((results, total))
+        monitor_config::table
+            .filter(monitor_config::tag.is_not_null())
+            .select(monitor_config::tag.assume_not_null())
+            .distinct()
+            .order(monitor_config::tag.asc())
+            .load::<String>(&mut conn)
     }
 
     // 全量查询所有监控配置（/api/status 控制台聚合视图用）
@@ -164,12 +165,44 @@ mod tests {
             tag: None,
         };
         assert_eq!(repo.update_monitor(created.id, &update).unwrap(), 1);
-        let (list, total) = repo.get_monitors_by_enabled(false, 1, 10).unwrap();
+        let (list, total) = repo.list_monitors(Some(false), None, 1, 10).unwrap();
         assert_eq!(total, 1);
         assert_eq!(list[0].id, created.id);
         // 删除后不可再查到
         assert_eq!(repo.delete_monitor(created.id).unwrap(), 1);
         assert!(repo.get_monitor_by_id(created.id).unwrap().is_none());
+    }
+
+    // tag 筛选 + 去重标签列表
+    #[test]
+    fn list_filters_by_tag_and_distinct_tags() {
+        let repo = MonitorRepository::new(Arc::new(test_pool(tempfile::tempdir().unwrap().path())));
+        let with_tag = |name: &str, tag: Option<&str>| MonitorConfigInsert {
+            name: Some(name.to_string()),
+            target: format!("https://{name}.com"),
+            method: Some("GET".to_string()),
+            monitor_type: "HTTP".to_string(),
+            interval_ms: Some(5000),
+            timeout_ms: 5000,
+            config_json: Some("{}".to_string()),
+            enabled: 1,
+            tag: tag.map(str::to_string),
+        };
+        repo.create_monitor(&with_tag("a", Some("prod"))).unwrap();
+        repo.create_monitor(&with_tag("b", Some("prod"))).unwrap();
+        repo.create_monitor(&with_tag("c", Some("staging"))).unwrap();
+        repo.create_monitor(&with_tag("d", None)).unwrap();
+
+        // 按 tag 筛选
+        let (list, total) = repo.list_monitors(None, Some("prod"), 1, 10).unwrap();
+        assert_eq!(total, 2, "prod 应有两条");
+        assert!(list.iter().all(|m| m.tag.as_deref() == Some("prod")));
+        // 不带 tag：全部
+        let (_, total_all) = repo.list_monitors(None, None, 1, 10).unwrap();
+        assert_eq!(total_all, 4);
+        // 去重标签：prod / staging（None 不计），升序
+        let tags = repo.get_distinct_tags().unwrap();
+        assert_eq!(tags, vec!["prod".to_string(), "staging".to_string()]);
     }
 
     #[test]

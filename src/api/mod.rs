@@ -26,6 +26,11 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
                 "/monitors",
                 web::post().to(monitor_handlers::create_monitor),
             )
+            // 必须先于 /monitors/{id}，否则 "tags" 会被当作 id 捕获
+            .route(
+                "/monitors/tags",
+                web::get().to(monitor_handlers::get_monitor_tags),
+            )
             .route(
                 "/monitors/{id}",
                 web::get().to(monitor_handlers::get_monitor_by_id),

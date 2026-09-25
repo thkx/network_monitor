@@ -10,7 +10,7 @@
   - `monitor --interval N` — 按 N 秒间隔持续探测（无持久化）
   - `server --port N --interval N` — 完整闭环：持久化 + 调度 + 告警 + Web API
     （`--interval` 为未配置 interval 的监控项的默认间隔，秒，缺省 5；调度任务与手动执行共用）
-- **Web API**：监控配置 CRUD、分页筛选、启用/禁用（PATCH）、结果查询，配置变更热更新（无需重启）
+- **Web API**：监控配置 CRUD、分页筛选（含 `tag` 分组）、启用/禁用（PATCH）、结果查询，配置变更热更新（无需重启）
 - **告警体系**：
   - `AVAILABILITY` 通用可用性规则（全部监控类型生效）、`RESPONSE_CODE` 响应码规则（仅 HTTP）、`CONTENT` 内容校验规则（仅 HTTP，内容规则存在未命中项时告警）、`THRESHOLD` 阈值规则（系统资源类）
   - 状态机式告警：故障只告警一次，恢复时发送恢复通知，抑制状态持久化到数据库（重启不重复告警）
@@ -43,7 +43,8 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 
 | 方法   | 路径                                                | 说明                                        |
 | ------ | --------------------------------------------------- | ------------------------------------------- |
-| GET    | `/api/monitors?page_no=1&page_size=20&enabled=true` | 分页查询监控配置（enabled 可选筛选）        |
+| GET    | `/api/monitors?page_no=1&page_size=20&enabled=true&tag=prod` | 分页查询监控配置（enabled / tag 可选筛选）  |
+| GET    | `/api/monitors/tags`                                | 库中出现过的全部分组标签（去重升序）        |
 | GET    | `/api/monitors/{id}`                                | 查询单个监控配置                            |
 | POST   | `/api/monitors`                                     | 创建监控（请求体同 monitor_list.json 单项） |
 | PUT    | `/api/monitors/{id}`                                | 更新监控（enabled 不变）                    |
@@ -241,7 +242,8 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 | `GET /`                        | Web 控制台页面                             |
 | `GET /metrics`                 | Prometheus 指标端点                        |
 | `GET /api/status`              | 控制台聚合视图（配置+最新结果+告警状态）   |
-| `GET /api/monitors`            | 监控配置分页查询（`enabled` 可选筛选）     |
+| `GET /api/monitors`            | 监控配置分页查询（`enabled` / `tag` 可选筛选） |
+| `GET /api/monitors/tags`       | 全部分组标签（去重升序，控制台筛选下拉用） |
 | `POST /api/monitors`           | 新建监控（非法配置返回 400）               |
 | `GET/PUT/DELETE /api/monitors/{id}` | 查询 / 更新 / 删除监控配置            |
 | `PATCH /api/monitors/{id}/enabled` | 启停监控（触发调度器热更新）           |
@@ -282,7 +284,7 @@ docker compose up -d
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（142个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
+cargo test          # 运行全部测试（149个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```

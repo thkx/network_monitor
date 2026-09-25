@@ -15,6 +15,7 @@ pub struct PaginationParams {
     pub page_no: Option<i64>,
     pub page_size: Option<i64>,
     pub enabled: Option<bool>, // 可选：true/false筛选启停状态，缺省查询全部
+    pub tag: Option<String>,   // 可选：按分组标签精确筛选，缺省不限
 }
 
 // 分页返回数据
