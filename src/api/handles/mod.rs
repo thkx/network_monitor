@@ -1,3 +1,4 @@
+pub mod alert_handlers;
 pub mod auth_handlers;
 pub mod console_handlers;
 pub mod health_handlers;

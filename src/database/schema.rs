@@ -38,7 +38,24 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    alert_history (id) {
+        id -> Integer,
+        monitor_id -> Integer,
+        alert_type -> Text,
+        state -> Text,
+        message -> Nullable<Text>,
+        created_at -> Nullable<Timestamp>,
+    }
+}
+
 diesel::joinable!(check_result -> monitor_config (monitor_id));
 diesel::joinable!(alert_state -> monitor_config (monitor_id));
+diesel::joinable!(alert_history -> monitor_config (monitor_id));
 
-diesel::allow_tables_to_appear_in_same_query!(check_result, monitor_config, alert_state,);
+diesel::allow_tables_to_appear_in_same_query!(
+    check_result,
+    monitor_config,
+    alert_state,
+    alert_history,
+);

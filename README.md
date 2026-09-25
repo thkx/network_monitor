@@ -52,6 +52,7 @@ curl http://127.0.0.1:8080/api/results?monitor_id=1
 | PATCH  | `/api/monitors/{id}/enabled`                        | 启用/禁用，body: `{"enabled": true}`        |
 | GET    | `/api/results?monitor_id=1&page_no=1&page_size=50`  | 分页查询监控结果（OFFSET 分页，返回 total） |
 | GET    | `/api/results?monitor_id=1&cursor=true&page_size=50`（翻页带 `&before_id=<上页末条id>`） | 游标（keyset）分页，深翻页不退化，返回 `next_cursor` |
+| GET    | `/api/alerts?monitor_id=1&page_size=20`（翻页带 `&before_id=<上页末条id>`） | 告警历史（触发/恢复事件），游标分页，返回 `next_cursor` |
 
 ## 告警配置示例
 
@@ -257,6 +258,8 @@ Server 模式访问 `http://127.0.0.1:8080/` 即是控制台——单文件原�
 | `PATCH /api/monitors/{id}/enabled` | 启停监控（触发调度器热更新）           |
 | `POST /api/monitors/{id}/run`  | 手动执行一次检查并持久化结果               |
 | `GET /api/results`             | 检查结果查询（`monitor_id` 可选过滤；OFFSET 分页，或 `cursor=true`/`before_id` 走游标分页）  |
+| `GET /api/alerts`              | 告警历史查询（`monitor_id` 可选过滤；`before_id` 游标分页，返回 `next_cursor`）  |
+| `GET /healthz`                 | 存活探针（免认证，恒 200 `{"status":"ok"}`） |
 
 ## 存储与写入策略
 
@@ -292,7 +295,7 @@ docker compose up -d
 ## 开发
 
 ```bash
-cargo test          # 运行全部测试（154个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
+cargo test          # 运行全部测试（157个：纯函数单测 + 临时库集成测试 + 端到端API/假服务器验证）
 cargo clippy --all-targets   # lint（当前0警告）
 cargo build         # 构建
 ```
@@ -312,7 +315,7 @@ src/
 │   ├── pool.rs          # 连接池、WAL、迁移
 │   ├── schema.rs        # diesel 表定义
 │   ├── models.rs        # 数据模型
-│   ├── repositories/    # 仓库层（monitor_config/check_result/alert_state）
+│   ├── repositories/    # 仓库层（monitor_config/check_result/alert_state/alert_history）
 │   └── services/        # 业务服务层
 ├── monitor/             # 12种监控引擎（策略模式 + 工厂）
 ├── tools/               # HTTP/TLS 探测、SMTP邮件（lettre封装）、重试策略
@@ -323,6 +326,7 @@ src/
 ### 设计要点
 
 - **告警引擎按任务独占**：每个监控任务持有独立的引擎实例与抑制状态；调度器热更新重建任务时，抑制状态从 `alert_state` 表恢复，避免"故障还在却重复告警"
+- **告警历史**：告警触发与恢复各写一行 `alert_history`（`state`=triggered/recovered、`alert_type`、`message`），控制台"🔔 告警"按钮或 `GET /api/alerts` 回溯；`alert_state` 只存当前抑制态，历史表回答"何时告过警、告了几次"
 - **check_id 贯穿**：每次检查生成 u128 ID，CSV 日志以 16 进制输出，同时写入数据库 `metadata_json.check_id`，两边可精确关联
 - **详情入库**：完整结果详情 JSON 一并写入 `metadata_json.details`（HTTP 的证书/耗时/安全头、FTP 握手过程等），`GET /api/results` 返回的 `metadata_json` 字段可直接回查失败现场，不依赖日志文件
 - **失败信息可观测**：HTTP 失败结果携带 `error_kind`（timeout/connect/decode/other）与 `error_message`，告警消息直接附带

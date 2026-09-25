@@ -110,6 +110,11 @@
     <div id="resultOut"></div>
   </div>
 
+  <div id="alertsPanel" class="card hidden">
+    <h2 id="alertsTitle">告警历史</h2>
+    <div id="alertOut"></div>
+  </div>
+
   <div id="runPanel" class="card hidden">
     <h2 id="runTitle">手动执行结果</h2>
     <div id="runOut"></div>
@@ -137,6 +142,7 @@ const API = {
   toggle:   id => `/api/monitors/${id}/enabled`,
   del:      id => `/api/monitors/${id}`,
   results:  id => `/api/results?monitor_id=${id}&page_no=1&page_size=15`,
+  alerts:   id => `/api/alerts?monitor_id=${id}&page_size=20`,
 };
 
 const EXAMPLE = {
@@ -251,6 +257,7 @@ function renderRows() {
       <td class="actions">
         <button data-act="run" data-id="${esc(m.id)}">▶ 运行</button>
         <button data-act="results" data-id="${esc(m.id)}" data-name="${esc(m.name)}">📋 结果</button>
+        <button data-act="alerts" data-id="${esc(m.id)}" data-name="${esc(m.name)}">🔔 告警</button>
         <button data-act="edit" data-id="${esc(m.id)}">✎ 编辑</button>
         <button data-act="toggle" data-id="${esc(m.id)}" data-enabled="${esc(m.enabled)}">${m.enabled === 1 ? '⏸ 停用' : '▶ 启用'}</button>
         <button class="danger" data-act="remove" data-id="${esc(m.id)}">🗑</button>
@@ -270,6 +277,7 @@ document.querySelector('#statusTable tbody').addEventListener('click', e => {
   switch (btn.dataset.act) {
     case 'run': runOnce(id); break;
     case 'results': showResults(id, btn.dataset.name || ''); break;
+    case 'alerts': showAlerts(id, btn.dataset.name || ''); break;
     case 'edit': editMonitor(id); break;
     case 'toggle': toggle(id, Number(btn.dataset.enabled)); break;
     case 'remove': removeMonitor(id); break;
@@ -369,6 +377,24 @@ async function showResults(id, name) {
       : j.data.list.map(x =>
           `#${x.id}  ${x.status === 1 ? '✔' : '✘'}  ${x.response_time} ms  ${x.created_at || ''}`
         ).join('\n') + `\n\n共 ${j.data.total} 条（显示最近 ${j.data.list.length} 条）`;
+  } catch (e) { out.textContent = '加载失败: ' + e.message; }
+}
+
+// 告警历史：按 monitor_id 拉最近若干条触发/恢复事件（keyset 分页，取最新一页）
+async function showAlerts(id, name) {
+  const panel = document.getElementById('alertsPanel');
+  const out = document.getElementById('alertOut');
+  document.getElementById('alertsTitle').textContent = `告警历史 — ${name}`;
+  panel.classList.remove('hidden');
+  try {
+    const r = await api(API.alerts(id));
+    const j = await r.json();
+    if (j.code !== 200) throw new Error(j.message);
+    out.textContent = j.data.list.length === 0
+      ? '（暂无告警历史）'
+      : j.data.list.map(x =>
+          `#${x.id}  ${x.state === 'triggered' ? '🔴 触发' : '🟢 恢复'}  [${x.alert_type}]  ${x.created_at || ''}\n    ${x.message || ''}`
+        ).join('\n') + `\n\n显示最近 ${j.data.list.length} 条`;
   } catch (e) { out.textContent = '加载失败: ' + e.message; }
 }
 

@@ -13,9 +13,13 @@ use super::rules::{
     detail_summary, evaluate_content, evaluate_response_code, evaluate_threshold,
     is_target_available,
 };
+use crate::database::models::AlertHistoryInsert;
+use crate::database::pool::SqlitePool;
+use crate::database::repositories::alert_history_repo::AlertHistoryRepository;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::domain::{AlertRuleTypes, AlertVerificationRules};
 use crate::monitor::types::CheckResult;
+use std::sync::Arc;
 
 // 告警引擎：持有通知引擎、告警规则与抑制状态，对外提供统一的check入口
 pub struct AlertsEngine {
@@ -30,6 +34,8 @@ pub struct AlertsEngine {
     // 抑制状态持久化（Server模式）：重启后从 alert_state 表恢复，
     // 避免"故障还在却重复告警"、"恢复时误报"；Once/Monitor模式为None（仅内存态）
     state: Option<(AlertStateRepository, i32)>,
+    // 告警历史（Server模式）：触发/恢复各写一行，供控制台回溯；Once/Monitor模式为None
+    history: Option<(AlertHistoryRepository, i32)>,
 }
 
 impl AlertsEngine {
@@ -50,24 +56,29 @@ impl AlertsEngine {
             hit_streak: 0,
             ok_streak: 0,
             state: None,
+            history: None,
             alert_rules: alert_rule,
             notify,
         }
     }
 
-    // 带状态持久化：Server模式使用，创建时从 alert_state 表恢复上次的抑制状态
+    // 带状态持久化：Server模式使用，创建时从 alert_state 表恢复上次的抑制状态，
+    // 并挂上 alert_history 仓库以记录后续的触发/恢复事件
     pub fn with_state(
         alert_rule: AlertVerificationRules,
-        repo: AlertStateRepository,
+        pool: Arc<SqlitePool>,
         monitor_id: i32,
     ) -> Self {
+        let state_repo = AlertStateRepository::new(pool.clone());
+        let history_repo = AlertHistoryRepository::new(pool);
         let mut engine = AlertsEngine::new(alert_rule);
         // 恢复失败不阻塞主流程，退化为内存态（等价旧行为）
-        match repo.get_alerting(monitor_id) {
+        match state_repo.get_alerting(monitor_id) {
             Ok(alerting) => engine.alerting = alerting,
             Err(e) => tracing::error!("恢复告警状态失败 (monitor_id={}): {}", monitor_id, e),
         }
-        engine.state = Some((repo, monitor_id));
+        engine.state = Some((state_repo, monitor_id));
+        engine.history = Some((history_repo, monitor_id));
         engine
     }
 
@@ -89,6 +100,29 @@ impl AlertsEngine {
         }
     }
 
+    // 记录一条告警历史（有持久化时）；失败只打日志，不影响告警主流程。
+    // 与 persist_state 同样挪到 spawn_blocking 阻塞池，避免同步DB写卡住runtime线程
+    async fn record_history(&self, alert_type: String, state: &'static str, message: String) {
+        let Some((repo, monitor_id)) = &self.history else {
+            return;
+        };
+        let repo = repo.clone();
+        let monitor_id = *monitor_id;
+        let rec = AlertHistoryInsert {
+            monitor_id,
+            alert_type,
+            state: state.to_string(),
+            message: Some(message),
+        };
+        match tokio::task::spawn_blocking(move || repo.insert(&rec)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::error!("写入告警历史失败 (monitor_id={}): {}", monitor_id, e)
+            }
+            Err(e) => tracing::error!("告警历史写入任务失败 (monitor_id={}): {}", monitor_id, e),
+        }
+    }
+
     // 告警规则check事件：状态机式告警——异常时只告警一次，恢复时发送一次恢复通知
     // 注意：失败（不可用、未拿到响应码）的监控结果同样参与检查，避免站点宕机时漏告警
     // 防抖：连续 N 次命中才告警、连续 M 次正常才恢复（缺省均为1，即保持"首次即触发"的旧行为）
@@ -104,11 +138,17 @@ impl AlertsEngine {
                 self.hit_streak = self.hit_streak.saturating_add(1);
                 self.ok_streak = 0;
                 if !self.alerting && self.hit_streak >= failures_threshold {
-                    let outcome = self.notify.send_alert_message(message).await;
+                    let outcome = self.notify.send_alert_message(message.clone()).await;
                     if outcome.is_delivered() {
                         self.alerting = true;
                         self.hit_streak = 0;
                         self.persist_state(true).await;
+                        self.record_history(
+                            check_result.monitor_type.to_string(),
+                            "triggered",
+                            message,
+                        )
+                        .await;
                     } else {
                         // 首发失败（后台重试进行中）：保持未告警态，重置防抖，
                         // 下一轮再积累consecutive_failures次命中后重发
@@ -122,21 +162,25 @@ impl AlertsEngine {
                 self.hit_streak = 0;
                 if self.alerting && self.ok_streak >= successes_threshold {
                     let target = check_result.target.clone().unwrap_or_default();
-                    let outcome = self
-                        .notify
-                        .send_alert_message(format!(
-                            "{} target: {} | {} | 异常已恢复（{}）",
-                            super::RECOVERY_PREFIX,
-                            target,
-                            check_result.monitor_type,
-                            detail_summary(&check_result.details)
-                        ))
-                        .await;
+                    let message = format!(
+                        "{} target: {} | {} | 异常已恢复（{}）",
+                        super::RECOVERY_PREFIX,
+                        target,
+                        check_result.monitor_type,
+                        detail_summary(&check_result.details)
+                    );
+                    let outcome = self.notify.send_alert_message(message.clone()).await;
                     // 恢复通知首发失败：保持告警态，重置正常计数，
                     // 下一轮连续正常达到阈值时重发恢复通知
                     if outcome.is_delivered() {
                         self.alerting = false;
                         self.persist_state(false).await;
+                        self.record_history(
+                            check_result.monitor_type.to_string(),
+                            "recovered",
+                            message,
+                        )
+                        .await;
                     }
                     self.ok_streak = 0;
                 }

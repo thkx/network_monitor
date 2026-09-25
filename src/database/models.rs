@@ -2,7 +2,7 @@ use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::database::schema::{alert_state, check_result, monitor_config};
+use crate::database::schema::{alert_history, alert_state, check_result, monitor_config};
 
 #[derive(Queryable, Debug, Clone, Serialize, Deserialize)]
 #[diesel(table_name = monitor_config)]
@@ -89,4 +89,26 @@ pub struct AlertStateModel {
 pub struct AlertStateModelInsert {
     pub monitor_id: i32,
     pub alerting: i32,
+}
+
+// 告警历史（alert_history表）：每次"触发/恢复"事件一行，供控制台回溯
+#[derive(Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
+#[diesel(table_name = alert_history)]
+pub struct AlertHistoryModel {
+    pub id: i32,
+    pub monitor_id: i32,
+    pub alert_type: String,
+    pub state: String, // 'triggered' | 'recovered'
+    pub message: Option<String>,
+    pub created_at: Option<NaiveDateTime>,
+}
+
+// 插入告警历史（id/created_at 由库生成）
+#[derive(Insertable, Debug, Clone)]
+#[diesel(table_name = alert_history)]
+pub struct AlertHistoryInsert {
+    pub monitor_id: i32,
+    pub alert_type: String,
+    pub state: String,
+    pub message: Option<String>,
 }

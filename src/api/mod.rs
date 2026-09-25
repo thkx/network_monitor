@@ -1,6 +1,7 @@
 pub mod handles;
 
 use actix_web::web;
+use handles::alert_handlers;
 use handles::auth_handlers;
 use handles::console_handlers;
 use handles::health_handlers;
@@ -60,6 +61,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route(
                 "/results",
                 web::get().to(result_handlers::get_check_results),
-            ),
+            )
+            .route("/alerts", web::get().to(alert_handlers::get_alerts)),
     );
 }

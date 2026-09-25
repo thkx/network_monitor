@@ -1,3 +1,4 @@
+pub mod alert_history_repo;
 pub mod alert_state_repo;
 pub mod monitor_repo;
 pub mod result_repo;
