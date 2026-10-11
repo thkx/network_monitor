@@ -161,6 +161,22 @@ document.getElementById('newJson').value = JSON.stringify(EXAMPLE, null, 2);
 // （认证未启用时首次refresh成功即视为已认证）
 let authed = false;
 
+// 各详情面板（运行/结果/告警/编辑）共用同一块 DOM，内容异步回填。
+// 用“请求序号”防止不同行的操作串数据：每次发起 +1 并捕获当次序号，
+// 回填前比对——若已被更晚的操作覆盖（切到了其它行），则丢弃这次迟到的响应。
+const panelSeq = { run: 0, results: 0, alerts: 0, edit: 0 };
+
+// 详情面板按“所属行”分组：同一行(同一 monitor)的运行/结果/告警/编辑可以同时展示；
+// 一旦操作切换到另一行(或切到“新建”)，先收起上一行留下的所有面板，避免两行数据串在一起。
+const DETAIL_PANELS = ['runPanel', 'resultsPanel', 'alertsPanel', 'newPanel'];
+let activeDetailKey = null; // 当前详情面板归属：monitor id，或 'new'（新建），null=无
+function activateRow(key) {
+  if (activeDetailKey !== key) {
+    for (const pid of DETAIL_PANELS) document.getElementById(pid).classList.add('hidden');
+    activeDetailKey = key;
+  }
+}
+
 // 统一数据请求入口：401时标记未认证并弹出登录浮层（凭证由浏览器cookie自动携带）
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -311,8 +327,15 @@ async function submitMonitorForm() {
 let editingId = null; // null=新建模式；数字=编辑模式（monitor id）
 
 function openNewPanel() {
-  resetEditor();
-  document.getElementById('newPanel').classList.toggle('hidden');
+  const panel = document.getElementById('newPanel');
+  // 已打开则收起；否则切到“新建”上下文（收起其它行遗留的面板）并展示
+  if (panel.classList.contains('hidden')) {
+    activateRow('new');
+    resetEditor();
+    panel.classList.remove('hidden');
+  } else {
+    panel.classList.add('hidden');
+  }
 }
 
 function resetEditor() {
@@ -325,33 +348,42 @@ function resetEditor() {
 
 // 进入编辑模式：/api/status聚合视图不含config_json，需按id回源拉完整配置
 async function editMonitor(id) {
+  const seq = ++panelSeq.edit; // 本次编辑请求序号：迟到的回源结果若已被更晚的点击覆盖则丢弃
   const panel = document.getElementById('newPanel');
   const errBox = document.getElementById('newErr');
   editingId = null; // 先清编辑态：回源失败时保持新建模式，避免残留上一个编辑目标导致提交改错监控
+  activateRow(id); // 编辑归属该行：切到别行会先收起本行其它面板
   panel.classList.remove('hidden');
   panel.scrollIntoView({ behavior: 'smooth' });
   errBox.textContent = '';
+  document.getElementById('newTitle').textContent = `编辑监控 #${id}（加载中…）`;
+  document.getElementById('newJson').value = '';
   try {
     const r = await api(API.get(id));
     const j = await r.json();
+    if (seq !== panelSeq.edit) return; // 已切换到其它行的编辑，丢弃本次迟到响应
     if (j.code !== 200) throw new Error(j.message);
     const cfg = j.data.config_json ? JSON.parse(j.data.config_json) : {};
     editingId = id;
     document.getElementById('newTitle').textContent = `编辑监控 #${id}`;
     document.getElementById('submitBtn').textContent = '保存修改';
     document.getElementById('newJson').value = JSON.stringify(cfg, null, 2);
-  } catch (e) { errBox.textContent = '加载配置失败: ' + e.message; }
+  } catch (e) { if (seq === panelSeq.edit) errBox.textContent = '加载配置失败: ' + e.message; }
 }
 
 async function runOnce(id) {
+  const seq = ++panelSeq.run;
   const panel = document.getElementById('runPanel');
   const out = document.getElementById('runOut');
   document.getElementById('runTitle').textContent = `手动执行结果（monitor_id=${id}）`;
+  activateRow(id);
   panel.classList.remove('hidden');
+  out.style.color = '';
   out.textContent = '执行中…';
   try {
     const r = await api(API.run(id), { method: 'POST' });
     const j = await r.json();
+    if (seq !== panelSeq.run) return; // 已切到其它行的执行，丢弃本次迟到响应，避免行间串数据
     if (!r.ok) { out.textContent = `HTTP ${r.status}: ${JSON.stringify(j)}`; return; }
     const d = j.data;
     out.style.color = d.status ? 'var(--ok)' : 'var(--fail)';
@@ -360,42 +392,50 @@ async function runOnce(id) {
       (d.status_code != null ? `  状态码 ${d.status_code}` : '') +
       `\ncheck_id: ${d.check_id}\n\n` + JSON.stringify(d.details, null, 2);
     refresh(false);
-  } catch (e) { out.style.color = 'var(--fail)'; out.textContent = '执行失败: ' + e.message; }
+  } catch (e) { if (seq === panelSeq.run) { out.style.color = 'var(--fail)'; out.textContent = '执行失败: ' + e.message; } }
 }
 
 async function showResults(id, name) {
+  const seq = ++panelSeq.results;
   const panel = document.getElementById('resultsPanel');
   const out = document.getElementById('resultOut');
   document.getElementById('resultsTitle').textContent = `检查结果 — ${name}`;
+  activateRow(id);
   panel.classList.remove('hidden');
+  out.textContent = '加载中…'; // 先清掉上一行的结果，避免新标题下残留上一行数据
   try {
     const r = await api(API.results(id));
     const j = await r.json();
+    if (seq !== panelSeq.results) return; // 已切到其它行，丢弃本次迟到响应
     if (j.code !== 200) throw new Error(j.message);
     out.textContent = j.data.list.length === 0
       ? '（暂无结果）'
       : j.data.list.map(x =>
           `#${x.id}  ${x.status === 1 ? '✔' : '✘'}  ${x.response_time} ms  ${x.created_at || ''}`
         ).join('\n') + `\n\n共 ${j.data.total} 条（显示最近 ${j.data.list.length} 条）`;
-  } catch (e) { out.textContent = '加载失败: ' + e.message; }
+  } catch (e) { if (seq === panelSeq.results) out.textContent = '加载失败: ' + e.message; }
 }
 
 // 告警历史：按 monitor_id 拉最近若干条触发/恢复事件（keyset 分页，取最新一页）
 async function showAlerts(id, name) {
+  const seq = ++panelSeq.alerts;
   const panel = document.getElementById('alertsPanel');
   const out = document.getElementById('alertOut');
   document.getElementById('alertsTitle').textContent = `告警历史 — ${name}`;
+  activateRow(id);
   panel.classList.remove('hidden');
+  out.textContent = '加载中…'; // 先清掉上一行的告警，避免新标题下残留上一行数据
   try {
     const r = await api(API.alerts(id));
     const j = await r.json();
+    if (seq !== panelSeq.alerts) return; // 已切到其它行，丢弃本次迟到响应
     if (j.code !== 200) throw new Error(j.message);
     out.textContent = j.data.list.length === 0
       ? '（暂无告警历史）'
       : j.data.list.map(x =>
           `#${x.id}  ${x.state === 'triggered' ? '🔴 触发' : '🟢 恢复'}  [${x.alert_type}]  ${x.created_at || ''}\n    ${x.message || ''}`
         ).join('\n') + `\n\n显示最近 ${j.data.list.length} 条`;
-  } catch (e) { out.textContent = '加载失败: ' + e.message; }
+  } catch (e) { if (seq === panelSeq.alerts) out.textContent = '加载失败: ' + e.message; }
 }
 
 async function toggle(id, enabled) {

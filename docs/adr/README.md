@@ -34,6 +34,7 @@ ADR 是一份轻量、不可变、带编号的文档，记录**一个**架构/�
 | [0004](<0004-timeouts-and-resource-budgets.md>) | 统一超时与资源预算 | 已接受 |
 | [0005](<0005-db-pagination-and-pragma.md>) | 数据库分页与连接/PRAGMA 治理 | 已接受 |
 | [0006](<0006-security-hardening.md>) | 安全加固 | 已接受 |
+| [0007](<0007-architecture-design-flaws-review.md>) | 架构级设计缺陷盘点与分批治理方向 | 草案 |
 
 > 新增 ADR 时请同步更新本表。
 
