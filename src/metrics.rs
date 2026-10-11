@@ -5,9 +5,16 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::async_monitor::ResultRoute;
+
+// 进程级运行时计数器（ADR-0008）：跨所有监控任务共享，/metrics 以进程级 counter 暴露。
+// 不随 monitor_id 分标签——度量调度/通道/任务层面的健康，而非单个监控。
+pub static RESULTS_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0); // A1：结果通道满而丢弃的结果数
+pub static TASK_PANICS_TOTAL: AtomicU64 = AtomicU64::new(0); // A2：被捕获的 check panic 次数
+pub static ALERT_EVAL_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0); // G3：告警评估返回 Err 的次数
 
 // 响应耗时直方图桶上界（秒）：HTTP探测多为亚秒级，末桶兜底长超时任务
 const DURATION_BUCKETS_SECS: [f64; 12] = [
@@ -218,6 +225,30 @@ impl MetricsRegistry {
                 let _ = write!(out, "network_monitor_alerting{{{labels}}} {}\n", alerting_v);
             }
         }
+        // 进程级运行时计数器（ADR-0008）：始终输出，供排障与告警（通道/任务层面健康）
+        out.push_str(
+            "# HELP network_monitor_results_dropped_total 结果通道满而丢弃的检查结果数（不影响告警，仅落库/CSV/指标缺口）\n",
+        );
+        out.push_str("# TYPE network_monitor_results_dropped_total counter\n");
+        let _ = write!(
+            out,
+            "network_monitor_results_dropped_total {}\n",
+            RESULTS_DROPPED_TOTAL.load(Ordering::Relaxed)
+        );
+        out.push_str("# HELP network_monitor_task_panics_total 监控检查执行中被捕获的 panic 次数\n");
+        out.push_str("# TYPE network_monitor_task_panics_total counter\n");
+        let _ = write!(
+            out,
+            "network_monitor_task_panics_total {}\n",
+            TASK_PANICS_TOTAL.load(Ordering::Relaxed)
+        );
+        out.push_str("# HELP network_monitor_alert_eval_errors_total 告警评估返回错误的次数\n");
+        out.push_str("# TYPE network_monitor_alert_eval_errors_total counter\n");
+        let _ = write!(
+            out,
+            "network_monitor_alert_eval_errors_total {}\n",
+            ALERT_EVAL_ERRORS_TOTAL.load(Ordering::Relaxed)
+        );
         out
     }
 }

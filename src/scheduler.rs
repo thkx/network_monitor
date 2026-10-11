@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -23,6 +24,9 @@ pub struct Scheduler {
     pool: Arc<SqlitePool>,
     // 默认监控间隔（秒）：配置项未指定interval时使用（--interval，与Once/Monitor模式同源）
     default_interval: u64,
+    // 协作式关停标志（ADR-0008 A4）：置位后各监控任务在循环顶干净退出。
+    // 全体任务共享同一标志；仅进程级 shutdown 使用（reload 走单任务 abort 硬替换）
+    stop: Arc<AtomicBool>,
 }
 
 impl Scheduler {
@@ -32,6 +36,7 @@ impl Scheduler {
             tx: None,
             pool,
             default_interval,
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -76,9 +81,17 @@ impl Scheduler {
         }
     }
 
+    // 置协作式关停标志（ADR-0008 A4）：仅短暂持锁置位，由调用方在释放锁后
+    // 等待宽限期让任务在循环顶自然退出，再调用 shutdown 兜底 abort
+    pub fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     // 优雅关停：停止全部监控任务并释放调度器持有的发送端。
-    // 发送端全部drop后，结果消费者的recv返回None，触发最终攒批落库后退出
+    // 发送端全部drop后，结果消费者的recv返回None，触发最终攒批落库后退出。
+    // ADR-0008 A4：置停止标志后对仍存活句柄 abort 兜底（宽限期由调用方在锁外 await）
     pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         for (_id, handle) in self.tasks.drain() {
             handle.abort();
         }
@@ -133,6 +146,7 @@ impl Scheduler {
             },
             engine,
             tx,
+            self.stop.clone(),
         );
         self.tasks.insert(row.id, handle);
     }

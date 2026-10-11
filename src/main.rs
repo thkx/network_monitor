@@ -102,6 +102,8 @@ async fn main() {
             }
             // 所有监控任务共享一个通道，结果由单一消费者顺序处理，避免多通道轮询消费互相阻塞
             let (tx, mut rx) = mpsc::channel::<MonitorResultMessage>(100);
+            // Monitor 模式无热更新/优雅关停（随进程 Ctrl+C 终止）：共享一个恒 false 的停止标志
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             for entry in &monitor_list {
                 let name = display_name(entry);
                 let config = MonitorConfig::from_entry(entry, interval);
@@ -118,6 +120,7 @@ async fn main() {
                     },
                     engine,
                     tx.clone(),
+                    stop.clone(),
                 );
             }
             drop(tx); // 丢弃主发送端，各监控任务各自持有clone
@@ -270,7 +273,13 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
         tracing::error!("Web API 服务异常退出: {}", e);
     }
     // 服务器退出后：停止全部监控任务并释放调度器持有的发送端；
-    // 发送端全部drop后消费者的recv返回None，触发最终攒批落库后退出
+    // 发送端全部drop后消费者的recv返回None，触发最终攒批落库后退出。
+    // ADR-0008 A4：协作式关停——先置停止标志（短暂持锁），释放锁后给一个宽限期让任务
+    // 在循环顶自然退出，再 shutdown 兜底 abort 仍存活的任务（在途单轮探测尽量跑完）
+    if let Ok(sched) = scheduler_for_shutdown.lock() {
+        sched.signal_stop();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     if let Ok(mut sched) = scheduler_for_shutdown.lock() {
         sched.shutdown();
         tracing::info!("已停止全部定时监控任务");
