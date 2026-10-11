@@ -19,6 +19,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/logout", web::post().to(auth_handlers::logout));
     cfg.route("/metrics", web::get().to(metrics_handlers::get_metrics));
     cfg.route("/healthz", web::get().to(health_handlers::get_healthz));
+    cfg.route("/readyz", web::get().to(health_handlers::get_readyz));
     cfg.service(
         web::scope("/api")
             .route(

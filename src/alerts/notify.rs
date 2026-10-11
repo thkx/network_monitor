@@ -11,7 +11,10 @@ use tokio::sync::Semaphore;
 
 // 渠道共享的webhook客户端：每次告警发送新建Client（TLS配置+连接池）纯属浪费。
 // 5秒总超时与原实现一致；loopback目标直连（系统代理不应劫持发往本机的webhook）
-static WEBHOOK_CLIENT: OnceLock<Client> = OnceLock::new();
+// 构建失败不再 panic（ADR-0007 C11，对齐 ADR-0003 对 HttpMonitor 的处理）：
+// 存 Option，失败时记 error 并存 None，发送路径据此返回 Deferred 走状态机下轮重发，
+// 避免首个 webhook 告警触发时因客户端初始化失败而使告警路径 panic
+static WEBHOOK_CLIENT: OnceLock<Option<Client>> = OnceLock::new();
 
 // 读取webhook响应体的上限（64KB）：业务码字段（errcode/code/StatusCode）都在JSON开头，
 // 异常网关/错误配置可能返回超大body，无上限读取会吃内存。截断不影响业务码解析
@@ -30,13 +33,17 @@ fn retry_semaphore() -> &'static Semaphore {
     RETRY_SEMAPHORE.get_or_init(|| Semaphore::new(MAX_BACKGROUND_RETRIES))
 }
 
-fn webhook_client() -> Client {
+fn webhook_client() -> Option<Client> {
     WEBHOOK_CLIENT
         .get_or_init(|| {
             Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .expect("Failed to create webhook HTTP client")
+                .map_err(|e| {
+                    tracing::error!("创建 webhook HTTP 客户端失败，本进程 webhook 告警将不可用: {}", e);
+                    e
+                })
+                .ok()
         })
         .clone()
 }
@@ -227,7 +234,16 @@ impl NotifyEngine {
         message: &str,
         channel: &str,
     ) -> SendOutcome {
-        let client = webhook_client();
+        let Some(client) = webhook_client() else {
+            // 客户端初始化失败（已在 webhook_client 记 error）：不 panic，返回 Deferred，
+            // 告警状态机保持未告警态、下一轮命中时重发
+            tracing::error!(
+                "{}告警发送失败：webhook 客户端不可用，本次转下轮重发: {}",
+                channel,
+                message
+            );
+            return SendOutcome::Deferred;
+        };
         match Self::try_post(&client, url, &body, channel).await {
             Ok(()) => {
                 tracing::info!("{}告警发送成功: {}", channel, message);

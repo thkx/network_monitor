@@ -25,12 +25,36 @@ impl CheckResultRepository {
     }
 
     // 删除 N 天前的监控结果（数据保留策略：check_result只增不删会无限膨胀）
+    // 分批删除（ADR-0007 B8）：单条无界 DELETE 作用在最热表上会长时间独占写锁，
+    // 阻塞单消费者的结果写入链并撑大 WAL（与 ADR-0005 的写放大/WAL 治理相抵）。
+    // 改为每批至多 RETENTION_DELETE_BATCH 行、循环直到删尽，把一个长写事务切成多个短事务，
+    // 让结果写入在批与批之间有机会插入。
     pub fn delete_older_than_days(&self, days: i64) -> Result<usize, diesel::result::Error> {
+        const RETENTION_DELETE_BATCH: i64 = 500;
         let mut conn = get_connection(&self.pool)?;
         // created_at由SQLite的CURRENT_TIMESTAMP写入，是UTC时间，这里同样取UTC做比较
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).naive_utc();
-        diesel::delete(check_result::table.filter(check_result::created_at.lt(Some(cutoff))))
-            .execute(&mut conn)
+        let mut total = 0usize;
+        loop {
+            // 先取一批待删主键（id 为 rowid 别名、单调递增），再按主键删除；
+            // 分块大小 500 同时控制在 SQLite 变量上限（旧版 999）之内
+            let ids: Vec<i32> = check_result::table
+                .filter(check_result::created_at.lt(Some(cutoff)))
+                .select(check_result::id)
+                .order(check_result::id.asc())
+                .limit(RETENTION_DELETE_BATCH)
+                .load(&mut conn)?;
+            if ids.is_empty() {
+                break;
+            }
+            let n = diesel::delete(check_result::table.filter(check_result::id.eq_any(&ids)))
+                .execute(&mut conn)?;
+            total += n;
+            if (n as i64) < RETENTION_DELETE_BATCH {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     // 批量插入多条监控结果：单条多行INSERT语句
@@ -64,24 +88,34 @@ impl CheckResultRepository {
         &self,
         monitor_ids: &[i32],
     ) -> Result<Vec<CheckResultModel>, diesel::result::Error> {
+        // 分块避免 IN 列表随监控数无界增长而撞 SQLite 变量上限（旧版 999）（ADR-0007 B7）
+        const IN_CHUNK: usize = 500;
         if monitor_ids.is_empty() {
             return Ok(Vec::new());
         }
         let mut conn = get_connection(&self.pool)?;
-        // 第1步：各监控最新一条的 id（GROUP BY 聚合，一次往返）
-        let latest_ids: Vec<Option<i32>> = check_result::table
-            .filter(check_result::monitor_id.eq_any(monitor_ids))
-            .group_by(check_result::monitor_id)
-            .select(diesel::dsl::max(check_result::id))
-            .load(&mut conn)?;
-        let ids: Vec<i32> = latest_ids.into_iter().flatten().collect();
+        // 第1步：各监控最新一条的 id（GROUP BY 聚合）；按监控数分块，每块一次往返
+        let mut ids: Vec<i32> = Vec::new();
+        for chunk in monitor_ids.chunks(IN_CHUNK) {
+            let latest_ids: Vec<Option<i32>> = check_result::table
+                .filter(check_result::monitor_id.eq_any(chunk))
+                .group_by(check_result::monitor_id)
+                .select(diesel::dsl::max(check_result::id))
+                .load(&mut conn)?;
+            ids.extend(latest_ids.into_iter().flatten());
+        }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        // 第2步：按主键集合一次性取回行
-        check_result::table
-            .filter(check_result::id.eq_any(ids))
-            .load::<CheckResultModel>(&mut conn)
+        // 第2步：按主键集合分块一次性取回行
+        let mut rows: Vec<CheckResultModel> = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(IN_CHUNK) {
+            let part = check_result::table
+                .filter(check_result::id.eq_any(chunk))
+                .load::<CheckResultModel>(&mut conn)?;
+            rows.extend(part);
+        }
+        Ok(rows)
     }
 
     // 分页查询监控结果（monitor_id为None时查询全部）
@@ -315,5 +349,28 @@ mod tests {
         assert!(repo.get_latest_by_monitor(&[]).unwrap().is_empty());
         // 全部无记录：返回空
         assert!(repo.get_latest_by_monitor(&[c]).unwrap().is_empty());
+    }
+
+    // 分批删除（B8）：插入超过单批上限（500）的行，delete_older_than_days 需跨多批删尽
+    #[test]
+    fn retention_delete_spans_multiple_batches() {
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let monitor_id = create_test_monitor(&pool, "t-retention-batch");
+        let repo = CheckResultRepository::new(pool);
+        // 1200 行 > 2×批上限，验证循环会多批删尽而非只删一批
+        let inserts: Vec<CheckResultModelInsert> = (0..1200)
+            .map(|_| CheckResultModelInsert {
+                monitor_id,
+                monitor_type: "HTTP".to_string(),
+                status: 1,
+                response_time: 1,
+                metadata_json: None,
+            })
+            .collect();
+        assert_eq!(repo.insert_check_results_batch(&inserts).unwrap(), 1200);
+        // 负数天数=截止时间在未来→全部过期，应一次调用跨多批全部删除
+        assert_eq!(repo.delete_older_than_days(-1).unwrap(), 1200);
+        assert_eq!(repo.get_check_results(None, 1, 10).unwrap().1, 0);
     }
 }

@@ -323,6 +323,11 @@ impl Auth {
         if path == "/healthz" && req.method() == Method::GET {
             return None;
         }
+        // 就绪探针放行（ADR-0007 D10）：/readyz 轻量校验依赖（DB）可用性，
+        // 同样免认证供编排器摘流/延迟引流判断，返回体不含敏感信息
+        if path == "/readyz" && req.method() == Method::GET {
+            return None;
+        }
         // 控制台静态页放行：页面本身无敏感数据，401由页面JS请求/api/*时触发，
         // 弹出登录浮层（否则HTML加载不出来，用户只能看到裸401 JSON）
         if path == "/" && req.method() == Method::GET {

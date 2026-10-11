@@ -10,6 +10,7 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::Mailbox,
     message::header::ContentType, transport::smtp::authentication::Credentials,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -17,9 +18,14 @@ use std::time::Duration;
 // SMTP连接/操作超时：避免对无响应的SMTP服务器无限期挂起，拖住后台重试任务
 const SMTP_TIMEOUT: Duration = Duration::from_secs(10);
 
+// 传输器缓存容量上限（ADR-0007 C10）：缓存只增不减会在口令轮换/多SMTP配置下无界增长、
+// 内存泄漏。到达上限且为新键时驱逐一个旧项（传输器重建廉价），把缓存钉在有限大小。
+const SMTP_TRANSPORT_CACHE_CAP: usize = 32;
+
 // 复用SMTP传输器：lettre的AsyncSmtpTransport内部持有连接池，每封邮件/每次重试都 build()
-// 会重复构造TLS配置与连接池纯属浪费。按 (host, port, username, password) 缓存复用——
-// 键包含凭证，确保不同配置互不串用；传输器 clone 很廉价（内部Arc）。
+// 会重复构造TLS配置与连接池纯属浪费。按 (host, port, username, password_hash) 缓存复用——
+// 键用口令的 SHA-256 摘要而非明文（ADR-0007 C10：避免明文口令长期驻留内存、缩小暴露面），
+// 不同配置互不串用；传输器 clone 很廉价（内部Arc）。
 // 仅缓存构建成功的传输器；loopback明文凭证拦截失败的配置永远进不了缓存
 static SMTP_TRANSPORTS: OnceLock<Mutex<HashMap<TransportKey, AsyncSmtpTransport<Tokio1Executor>>>> =
     OnceLock::new();
@@ -29,7 +35,15 @@ struct TransportKey {
     host: String,
     port: u16,
     username: String,
-    password: String,
+    // 口令的 SHA-256 摘要（不存明文）：仍能区分不同口令，碰撞概率可忽略
+    password_hash: [u8; 32],
+}
+
+// 口令摘要：用 SHA-256 把口令折叠成固定摘要，避免在进程级缓存键里长期保留明文
+fn hash_secret(secret: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.finalize().into()
 }
 
 fn transport_cache() -> &'static Mutex<HashMap<TransportKey, AsyncSmtpTransport<Tokio1Executor>>> {
@@ -77,7 +91,7 @@ fn get_transport(cfg: &EmailNotifyConfig) -> Result<AsyncSmtpTransport<Tokio1Exe
         host: cfg.smtp_host.clone(),
         port: cfg.smtp_port,
         username: cfg.username.clone(),
-        password: cfg.password.clone(),
+        password_hash: hash_secret(&cfg.password),
     };
     // 读路径：命中直接克隆复用（克隆廉价，持锁期间不跨await）
     if let Some(transport) = transport_cache().lock().unwrap().get(&key).cloned() {
@@ -86,6 +100,12 @@ fn get_transport(cfg: &EmailNotifyConfig) -> Result<AsyncSmtpTransport<Tokio1Exe
     // 未命中：构建一次（含loopback拦截），成功后写入缓存并返回
     let transport = build_transport(cfg)?;
     let mut cache = transport_cache().lock().unwrap();
+    // 容量封顶（C10）：到达上限且为新键时先驱逐一个旧项，避免无界增长
+    if cache.len() >= SMTP_TRANSPORT_CACHE_CAP && !cache.contains_key(&key)
+        && let Some(victim) = cache.keys().next().cloned()
+    {
+        cache.remove(&victim);
+    }
     Ok(cache.entry(key).or_insert(transport).clone())
 }
 
