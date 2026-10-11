@@ -1,7 +1,7 @@
 use diesel::{
     connection::SimpleConnection,
     prelude::*,
-    r2d2::{ConnectionManager, Pool, PooledConnection},
+    r2d2::{ConnectionManager, CustomizeConnection, Pool, PooledConnection},
 };
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
@@ -18,12 +18,47 @@ pub type SqlitePooledConnection = PooledConnection<ConnectionManager<SqliteConne
 // 使用diesel_migrations 方便进行数据的迁移
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!(); // 默认 查找与cargo.toml同级目录下的migrations文件夹
 
+// r2d2 建连回调：仅在"物理连接创建后"触发一次（on_acquire 不是每次 get 都跑），
+// 是设置连接级 PRAGMA 的正确位置。此前在 get_connection 里每次借连接都重跑 PRAGMA、
+// 且用 `let _ =` 吞掉错误；现集中到建连时一次性设置，并把失败作为取连接错误上报
+// （返回 Err 并 tracing::error! 记录），不再静默吞错。
+#[derive(Debug)]
+struct ConnectionPragmas;
+
+impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for ConnectionPragmas {
+    fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), diesel::r2d2::Error> {
+        // 连接级 PRAGMA（无法持久化到库文件，必须每条物理连接设置）：
+        //   foreign_keys = ON       —— 不开则 ON DELETE CASCADE 失效，删监控会留孤儿行
+        //   busy_timeout = 5000     —— 遇写锁最多等 5 秒再报 database is locked
+        //   synchronous = NORMAL    —— WAL 下安全且显著降低 fsync 开销（用户已确认）
+        //   wal_autocheckpoint=1000 —— 每累积约 1000 页自动 checkpoint，防 WAL 文件无限膨胀
+        conn.batch_execute(
+            "PRAGMA foreign_keys = ON; \
+             PRAGMA busy_timeout = 5000; \
+             PRAGMA synchronous = NORMAL; \
+             PRAGMA wal_autocheckpoint = 1000;",
+        )
+        .map_err(|e| {
+            tracing::error!("建连时设置连接级 PRAGMA 失败: {}", e);
+            diesel::r2d2::Error::QueryError(e)
+        })
+    }
+}
+
 pub fn establish_connection() -> Result<SqlitePool, Box<dyn Error>> {
     let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| "./db/monitor.db".to_string());
     let manager = ConnectionManager::<SqliteConnection>::new(database_url);
     let pool = Pool::builder()
-        .max_size(8) // 设置最大链接数
+        // SQLite 为单写者：写操作在库级串行化，连接池主要服务并发读；8 条足够覆盖
+        // actix-web 读峰值，再大也无法突破单写者瓶颈，反而徒增打开的文件句柄与内存
+        .max_size(8)
+        // 保持至少 1 条空闲连接：避免低峰回落或冷启动后首个请求现建连（含 on_acquire
+        // 的 PRAGMA 往返）带来的首字节延迟毛刺
+        .min_idle(Some(1))
         .connection_timeout(Duration::from_secs(30)) // 设置超时时间
+        // 建连回调：每条物理连接创建后设置连接级 PRAGMA（foreign_keys/busy_timeout/
+        // synchronous/wal_autocheckpoint），失败即作为取连接错误上报
+        .connection_customizer(Box::new(ConnectionPragmas))
         .build(manager)
         .map_err(|e| format!("Failed to create DB pool: {}", e))?;
     let mut conn = pool
@@ -31,12 +66,9 @@ pub fn establish_connection() -> Result<SqlitePool, Box<dyn Error>> {
         .map_err(|e| format!("Failed to get DB connection from pool: {}", e))?;
     // WAL模式持久化在库文件上，对所有后续连接生效：读写不再互斥，
     // 大幅降低Web API读与监控结果写并发时的 database is locked 概率
+    // （foreign_keys 等连接级 PRAGMA 已由 ConnectionPragmas 建连回调统一设置）
     conn.batch_execute("PRAGMA journal_mode = WAL;")
         .map_err(|e| format!("Failed to set WAL journal mode: {}", e))?;
-    // 外键约束是连接级参数（无法持久化到库文件）：不开启则 ON DELETE CASCADE 全部失效，
-    // 删监控会留下 check_result/alert_state 孤儿行
-    conn.batch_execute("PRAGMA foreign_keys = ON;")
-        .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
     conn.run_pending_migrations(MIGRATIONS)
         .map_err(|e| format!("Failed to run database migrations: {}", e))?;
     Ok(pool)
@@ -62,14 +94,14 @@ pub async fn establish_database_connection() -> Result<Arc<SqlitePool>, Box<dyn 
 // 但热更新等同步上下文会静默失败）。用 diesel 的 QueryBuilderError 作为错误逃逸口，
 // 让全部仓库函数（均返回 diesel::result::Error）经 ? 统一走已有的错误降级路径
 pub fn get_connection(pool: &SqlitePool) -> Result<SqlitePooledConnection, diesel::result::Error> {
-    let mut conn = pool.get().map_err(|e| {
+    let conn = pool.get().map_err(|e| {
         diesel::result::Error::QueryBuilderError(
             format!("从连接池获取连接失败（池耗尽或超时）: {e}").into(),
         )
     })?;
-    // 连接级参数每次取出连接时设置：busy_timeout遇锁最多等5秒；
-    // foreign_keys开启级联删除（删监控自动清理check_result/alert_state）
-    let _ = conn.batch_execute("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+    // 连接级 PRAGMA（foreign_keys/busy_timeout/synchronous/wal_autocheckpoint）已在
+    // ConnectionPragmas 建连回调（on_acquire）中一次性设置，这里不再每次借连接重跑、
+    // 也不再 `let _ =` 吞错——设置失败会在建连阶段作为取连接错误上报
     Ok(conn)
 }
 
@@ -84,6 +116,8 @@ pub fn test_pool(dir: &std::path::Path) -> SqlitePool {
     let pool = Pool::builder()
         .max_size(4)
         .connection_timeout(Duration::from_secs(10))
+        // 测试池同样装配建连回调，使测试走与生产一致的连接级 PRAGMA（含 foreign_keys）
+        .connection_customizer(Box::new(ConnectionPragmas))
         .build(manager)
         .expect("测试连接池创建失败");
     let mut conn = pool.get().expect("测试连接获取失败");

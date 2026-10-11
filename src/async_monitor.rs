@@ -46,6 +46,9 @@ impl AsyncMonitor {
         tokio::spawn(async move {
             let mut engine = engine;
             let mut timer = interval(Duration::from_secs(config.interval.unwrap_or(60)));
+            // 若某轮 check 耗时超过 interval（如慢速探测），错过的 tick 不补偿、直接跳到下一个对齐点：
+            // 避免积压的 tick 在恢复后连续密集触发（突发打满），对齐"按节奏采样"的监控语义
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 timer.tick().await;
                 let (status, details) = target.check(&config).await;

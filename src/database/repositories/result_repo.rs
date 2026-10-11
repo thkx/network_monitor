@@ -57,7 +57,9 @@ impl CheckResultRepository {
     //   2) id IN (那批主键) 一次性把行取回
     // id 为 rowid 别名、随插入单调递增，max(id) 即该监控最新一条，与旧 ORDER BY
     // created_at DESC LIMIT 1 语义等价（同秒并列也由 id 序决出最新）。
-    // 两步均走已有索引（idx_check_result_monitor_created / 主键），无全表扫描
+    // 两步均走已有索引：第1步 GROUP BY monitor_id + max(id) 命中单列索引
+    // idx_check_result_monitor_id（SQLite 单列索引隐式含 rowid=id），第2步 id IN(...)
+    // 命中主键，均无全表扫描
     pub fn get_latest_by_monitor(
         &self,
         monitor_ids: &[i32],
@@ -112,7 +114,12 @@ impl CheckResultRepository {
     // 游标（keyset）分页：按 id 降序取 before_id 之前的一页。
     // 与 OFFSET 分页的区别——OFFSET 需扫描并丢弃前 N 行，翻到深页（page_no 很大）时
     // 在百万行的 check_result 上会退化为近全表扫描；keyset 用 `id < before_id` 直接命中
-    // 主键索引定位，翻页代价与页码无关（O(log n + page_size)）。
+    // 索引定位，翻页代价与页码无关（O(log n + page_size)）。
+    // 索引归属：带 monitor_id 过滤时走单列索引 idx_check_result_monitor_id——SQLite 单列
+    // 索引隐式追加 rowid（即 id），故其等价于 (monitor_id, id)，天然服务
+    // `WHERE monitor_id = ? AND id < ? ORDER BY id DESC`；monitor_id 为 None 时直接走主键
+    // （rowid）。注意并非复合索引 idx_check_result_monitor_created（按 created_at 排序，
+    // 读侧零使用，已随 2026-09-26 迁移删除）。
     // before_id 为 None 表示取第一页（最新）；返回结果按 id 降序，调用方用最后一条的 id 作为
     // 下一页的游标。不返回 total（keyset 语义下总数与翻页解耦，需要时另查 count）
     pub fn get_check_results_keyset(

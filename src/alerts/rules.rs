@@ -32,6 +32,9 @@ pub(super) fn evaluate_response_code(
     target: &str,
     check_result: &CheckResult,
     condition: &NotifyCondition,
+    // 预编译好的正则（规则加载期一次性编译，见 compile_response_code_regex）：
+    // 无正则条件或正则非法时为 None，此时正则分支按"安全跳过"处理
+    compiled_regex: Option<&Regex>,
 ) -> Option<String> {
     // 结果详情不是HTTP类型时无法评估响应码规则，跳过
     let CheckResultDetail::Http(ref http_result) = check_result.details else {
@@ -65,9 +68,10 @@ pub(super) fn evaluate_response_code(
             target, code, allowed_codes
         ));
     }
-    // regex非空时：响应码命中正则则触发告警
-    if !regex.is_empty()
-        && let Ok(regex_r) = Regex::new(regex)
+    // regex非空时：响应码命中正则则触发告警。
+    // 正则已在规则加载期预编译并缓存（见 compile_response_code_regex），热路径不再 Regex::new；
+    // 非法正则在加载期已记一次日志并以 None 传入，这里按"安全跳过"处理（与旧实现语义一致）
+    if let Some(regex_r) = compiled_regex
         && regex_r.is_match(&code.to_string())
     {
         return Some(format!(
@@ -76,6 +80,27 @@ pub(super) fn evaluate_response_code(
         ));
     }
     None
+}
+
+// 预编译响应码规则的正则：在规则加载/转换阶段一次性完成（见 AlertsEngine 构造函数），
+// 避免 evaluate 热路径每次评估都 Regex::new。
+//   - regex 为空：返回 None（未配置正则条件）
+//   - 正则非法：加载期记一次 warn 并返回 None，评估时按"安全跳过"处理，不在热路径编译/报错
+pub(super) fn compile_response_code_regex(condition: &NotifyCondition) -> Option<Regex> {
+    if condition.regex.is_empty() {
+        return None;
+    }
+    match Regex::new(&condition.regex) {
+        Ok(re) => Some(re),
+        Err(e) => {
+            tracing::warn!(
+                "告警响应码规则正则非法，加载期跳过该正则匹配: {}（{}）",
+                condition.regex,
+                e
+            );
+            None
+        }
+    }
 }
 
 // 内容匹配规则评估（仅HTTP有意义）：内容校验存在未命中项时返回告警消息
@@ -276,6 +301,12 @@ mod tests {
         }
     }
 
+    // 测试辅助：按生产路径先预编译正则再评估，一并覆盖 compile_response_code_regex
+    fn eval_rc(target: &str, cr: &CheckResult, condition: &NotifyCondition) -> Option<String> {
+        let re = super::compile_response_code_regex(condition);
+        evaluate_response_code(target, cr, condition, re.as_ref())
+    }
+
     #[test]
     fn failed_task_is_unavailable() {
         assert!(!is_target_available(&http_result(false, true, Some(200))));
@@ -326,7 +357,7 @@ mod tests {
     #[test]
     fn response_code_missing_code_triggers() {
         // 请求失败拿不到响应码：直接告警
-        let msg = evaluate_response_code(
+        let msg = eval_rc(
             "t",
             &http_result(true, false, None),
             &cond(vec![], vec![], ""),
@@ -339,7 +370,7 @@ mod tests {
     fn response_code_contains_list_hits() {
         // deny_codes 列表命中即告警；不在列表则静默
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(500)),
                 &cond(vec![500, 502], vec![], "")
@@ -347,7 +378,7 @@ mod tests {
             .is_some()
         );
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(200)),
                 &cond(vec![500, 502], vec![], "")
@@ -360,7 +391,7 @@ mod tests {
     fn response_code_allowed_list_hits() {
         // allowed_codes 允许列表：不在列表内即告警，在列表内静默
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(500)),
                 &cond(vec![], vec![200, 301], "")
@@ -368,7 +399,7 @@ mod tests {
             .is_some()
         );
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(200)),
                 &cond(vec![], vec![200, 301], "")
@@ -395,7 +426,7 @@ mod tests {
     fn response_code_regex_hits() {
         // 正则命中响应码即告警；非法正则安全跳过（不 panic）
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(503)),
                 &cond(vec![], vec![], r"5\d\d")
@@ -403,7 +434,7 @@ mod tests {
             .is_some()
         );
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(200)),
                 &cond(vec![], vec![], r"5\d\d")
@@ -411,7 +442,7 @@ mod tests {
             .is_none()
         );
         assert!(
-            evaluate_response_code(
+            eval_rc(
                 "t",
                 &http_result(true, true, Some(500)),
                 &cond(vec![], vec![], "([bad")
@@ -424,9 +455,7 @@ mod tests {
     #[test]
     fn response_code_skipped_for_non_http() {
         // 非HTTP结果无响应码语义：直接跳过
-        assert!(
-            evaluate_response_code("t", &icmp_result(), &cond(vec![], vec![200], "")).is_none()
-        );
+        assert!(eval_rc("t", &icmp_result(), &cond(vec![], vec![200], "")).is_none());
     }
 
     // ---- evaluate_content 直接单测 ----

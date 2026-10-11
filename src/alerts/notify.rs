@@ -4,11 +4,31 @@
 
 use crate::domain::{NotifyConfig, NotifyType};
 use reqwest::Client;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 // 渠道共享的webhook客户端：每次告警发送新建Client（TLS配置+连接池）纯属浪费。
 // 5秒总超时与原实现一致；loopback目标直连（系统代理不应劫持发往本机的webhook）
-static WEBHOOK_CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+static WEBHOOK_CLIENT: OnceLock<Client> = OnceLock::new();
+
+// 读取webhook响应体的上限（64KB）：业务码字段（errcode/code/StatusCode）都在JSON开头，
+// 异常网关/错误配置可能返回超大body，无上限读取会吃内存。截断不影响业务码解析
+const MAX_WEBHOOK_BODY_BYTES: usize = 64 * 1024;
+
+// 后台重试任务并发上限：单个重试任务按 RETRY_DELAYS_SECS 最长存活约456秒，大面积故障时
+// 会堆积大量后台任务吃资源。用进程级信号量封顶在途后台重试任务数；拿不到许可即放弃本次
+// 后台重试（记warn+计数）——此时首发已失败，调用方按 Deferred 处理，告警状态机会在下一轮
+// 命中时重发，不会静默置位抑制状态而丢失告警
+const MAX_BACKGROUND_RETRIES: usize = 64;
+static RETRY_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+// 因达到并发上限而被放弃的后台重试累计次数（仅用于可观测，不参与控制流）
+static RETRY_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn retry_semaphore() -> &'static Semaphore {
+    RETRY_SEMAPHORE.get_or_init(|| Semaphore::new(MAX_BACKGROUND_RETRIES))
+}
 
 fn webhook_client() -> Client {
     WEBHOOK_CLIENT
@@ -88,7 +108,25 @@ impl AlertSender for NotifyEngine {
                 } else {
                     "网络监控告警通知"
                 };
+                // 后台重试任务并发封顶（见 MAX_BACKGROUND_RETRIES）：EMAIL整单后台化，
+                // 拿不到许可说明在途后台任务已达上限，放弃本次并返回Deferred——不置位抑制状态，
+                // 下一轮命中时重发（届时许可可能已释放），避免过载时静默丢失告警
+                let permit = match retry_semaphore().try_acquire() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let n = RETRY_REJECTED_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+                        tracing::warn!(
+                            "后台重试任务已达上限({})，放弃本次EMAIL告警后台发送（累计放弃{}次）: {}",
+                            MAX_BACKGROUND_RETRIES,
+                            n,
+                            message
+                        );
+                        return SendOutcome::Deferred;
+                    }
+                };
                 tokio::spawn(async move {
+                    // 持有许可直到任务结束，占用一个后台重试并发名额
+                    let _permit = permit;
                     let outcome = retry_with_backoff(
                         |attempt| {
                             let cfg = cfg.clone();
@@ -209,7 +247,26 @@ impl NotifyEngine {
         let url = url.to_string();
         let channel = channel.to_string();
         let message = message.to_string();
+        // 后台重试任务并发封顶（见 MAX_BACKGROUND_RETRIES）：首发已失败，拿不到许可说明在途
+        // 后台任务已达上限，放弃本次后台重试并返回Deferred——告警状态机保持未告警态、
+        // 下一轮命中时重发（届时许可可能已释放），不会静默丢失
+        let permit = match retry_semaphore().try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                let n = RETRY_REJECTED_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::warn!(
+                    "后台重试任务已达上限({})，放弃本次{}告警后台重试（累计放弃{}次）: {}",
+                    MAX_BACKGROUND_RETRIES,
+                    channel,
+                    n,
+                    message
+                );
+                return SendOutcome::Deferred;
+            }
+        };
         tokio::spawn(async move {
+            // 持有许可直到任务结束，占用一个后台重试并发名额
+            let _permit = permit;
             let outcome = retry_with_backoff(
                 |attempt| {
                     let client = client.clone();
@@ -248,7 +305,7 @@ impl NotifyEngine {
         body: &serde_json::Value,
         channel: &str,
     ) -> Result<(), String> {
-        let resp = client
+        let mut resp = client
             .post(url)
             .json(body)
             .send()
@@ -258,11 +315,30 @@ impl NotifyEngine {
         if !status.is_success() {
             return Err(format!("{}返回状态码 {}", channel, status));
         }
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("{}响应体读取失败: {}", channel, e))?;
-        match serde_json::from_str::<serde_json::Value>(&text) {
+        // 仅读取响应体前 MAX_WEBHOOK_BODY_BYTES（64KB）：业务码字段都在JSON开头，
+        // 超大body按上限截断后再解析，避免异常网关返回巨型响应时吃内存
+        let mut buf: Vec<u8> = Vec::new();
+        while buf.len() < MAX_WEBHOOK_BODY_BYTES {
+            match resp
+                .chunk()
+                .await
+                .map_err(|e| format!("{}响应体读取失败: {}", channel, e))?
+            {
+                Some(chunk) => {
+                    let remaining = MAX_WEBHOOK_BODY_BYTES - buf.len();
+                    if chunk.len() >= remaining {
+                        buf.extend_from_slice(&chunk[..remaining]);
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                None => break,
+            }
+        }
+        // 截断可能切断多字节UTF-8/破坏JSON尾部；from_utf8_lossy + 解析失败按成功处理
+        // （见下方Err分支语义），业务码解析不受影响
+        let text = String::from_utf8_lossy(&buf);
+        match serde_json::from_str::<serde_json::Value>(text.as_ref()) {
             Ok(v) => match business_error(&v) {
                 Some(err) => Err(format!("{}业务错误: {}", channel, err)),
                 None => Ok(()),

@@ -53,7 +53,11 @@ pub async fn get_console_status(
         }
     })
     .await
-    .map_err(|e| actix_web::error::ErrorInternalServerError(format!("状态读取阻塞任务失败: {e}")))?
+    .map_err(|e| {
+        // 阻塞任务失败详情仅落日志，客户端只回通用 500（ADR-0006 E1 脱敏）
+        tracing::error!("状态读取阻塞任务失败: {}", e);
+        actix_web::error::ErrorInternalServerError("内部错误")
+    })?
     .map_err(internal_error)?;
     let latest_map: HashMap<i32, &CheckResultModel> =
         latest.iter().map(|r| (r.monitor_id, r)).collect();

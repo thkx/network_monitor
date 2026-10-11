@@ -13,12 +13,17 @@ pub async fn get_metrics(
     registry: web::Data<Arc<Mutex<MetricsRegistry>>>,
     pool: web::Data<Arc<SqlitePool>>,
 ) -> impl actix_web::Responder {
-    let alerting = AlertStateRepository::new(pool.get_ref().clone())
-        .get_all_alerting()
-        .ok();
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1）；查库/阻塞任何一层失败都降级为
+    // None（省略 alerting 家族），指标端点应尽力输出而不是报 500
+    let pool = pool.get_ref().clone();
+    let alerting = web::block(move || AlertStateRepository::new(pool).get_all_alerting())
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
     let body = registry
         .lock()
-        .expect("metrics锁中毒")
+        .unwrap_or_else(|e| e.into_inner())
         .render(alerting.as_deref());
     actix_web::HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")

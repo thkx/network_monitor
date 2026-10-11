@@ -4,6 +4,15 @@ use prettytable::csv::Writer;
 use std::error::Error;
 use std::fs::{File, OpenOptions};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+// 批量/定时刷盘阈值（ADR-0004 异步线程模型配套）：
+// 写记录仅进 csv::Writer 的内存缓冲（append，近似非阻塞），
+// 攒满 FLUSH_EVERY 条、或距上次刷盘超过 FLUSH_INTERVAL 才做一次 flush（写系统调用）。
+// 这样把原先“每条一次 flush 系统调用”从结果消费热路径上移除；
+// 崩溃时最多丢最后不足 1 秒的 CSV 记录（数据库为权威存储，CSV 为辅助）。
+const FLUSH_EVERY: usize = 64;
+const FLUSH_INTERVAL: Duration = Duration::from_millis(1000);
 
 // 定义记录结果的结构体
 #[derive(Debug, Clone)]
@@ -19,6 +28,8 @@ pub struct UrlLogResult {
 struct Inner {
     date: String,         // 当前 writer 对应的日期 YYYY-MM-DD
     writer: Writer<File>, // 常驻写句柄（此前每条日志都 open+flush+close，改为句柄常驻）
+    pending: usize,       // 自上次刷盘以来累积未 flush 的记录数
+    last_flush: Instant,  // 上次刷盘时刻（用于定时刷盘）
 }
 
 // 日志核心struct 用于后续的日志操作
@@ -70,7 +81,12 @@ impl CsvLogger {
         let writer = open_dated(base_path, &date).expect("CSV日志初始化失败");
         CsvLogger {
             base_path: base_path.to_string(),
-            inner: Mutex::new(Inner { date, writer }),
+            inner: Mutex::new(Inner {
+                date,
+                writer,
+                pending: 0,
+                last_flush: Instant::now(),
+            }),
         }
     }
 
@@ -82,11 +98,18 @@ impl CsvLogger {
 
     // 以显式日期写入（便于单测跨天滚动，无需等待自然跨天）
     fn log_at(&self, result: UrlLogResult, date: &str) -> Result<(), Box<dyn Error>> {
-        let mut inner = self.inner.lock().expect("CSV日志锁中毒");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if inner.date != date {
-            // 跨天滚动：切换到新日期文件；旧 writer 被替换后其文件句柄随之关闭
+            // 跨天滚动：切到新日期文件前，先刷掉旧句柄缓冲中残留的记录，避免丢数据；
+            // 旧 writer 被替换后其文件句柄随之关闭
+            let _ = inner.writer.flush();
             inner.writer = open_dated(&self.base_path, date)?;
             inner.date = date.to_string();
+            inner.pending = 0;
+            inner.last_flush = Instant::now();
         }
         let code = result
             .status_code
@@ -103,9 +126,37 @@ impl CsvLogger {
             result.response_time.to_string(),
             code,
         ])?;
-        // 常驻句柄仍逐条 flush 以保证监控日志的持久性（省去的是每条的 open/close）
-        inner.writer.flush()?;
+        // 批量/定时刷盘：写记录只进内存缓冲，攒满或超时才 flush（见文件头常量说明），
+        // 把每条一次的 flush 系统调用从消费热路径上移除。
+        inner.pending += 1;
+        if inner.pending >= FLUSH_EVERY || inner.last_flush.elapsed() >= FLUSH_INTERVAL {
+            inner.writer.flush()?;
+            inner.pending = 0;
+            inner.last_flush = Instant::now();
+        }
         Ok(())
+    }
+
+    // 显式刷盘：把内存缓冲中的记录写入磁盘。
+    // 由消费循环按秒级节奏调用、以及优雅关停前调用，保证 CSV 的及时持久化。
+    pub fn flush(&self) -> Result<(), Box<dyn Error>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.writer.flush()?;
+        inner.pending = 0;
+        inner.last_flush = Instant::now();
+        Ok(())
+    }
+}
+
+impl Drop for CsvLogger {
+    // 兜底刷盘：进程结束/日志器析构时尽力把缓冲写盘（Once/Monitor 模式无显式 flush 节奏时的保障）
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            let _ = inner.writer.flush();
+        }
     }
 }
 
@@ -146,6 +197,8 @@ mod tests {
 
         logger.log_at(rec("a"), "2025-01-01").unwrap();
         logger.log_at(rec("b"), "2025-01-02").unwrap(); // 跨天
+        // 批量刷盘后记录可能仍在内存缓冲：显式 flush 再读取校验
+        logger.flush().unwrap();
 
         let f1 = dir.path().join("monitor_log-2025-01-01.csv");
         let f2 = dir.path().join("monitor_log-2025-01-02.csv");

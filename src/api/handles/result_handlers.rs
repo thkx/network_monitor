@@ -1,7 +1,7 @@
 use actix_web::{HttpResponse, web};
 use serde::Deserialize;
 
-use super::response::{DefaultResponseObj, PageData, clamp_pagination};
+use super::response::{DefaultResponseObj, PageData, clamp_pagination, run_blocking};
 use crate::database::services::result_service::ResultService;
 
 use serde::Serialize;
@@ -28,22 +28,25 @@ pub struct CursorPageData<T: Serialize> {
 }
 
 // 查询监控结果（可按monitor_id过滤）：
-//   - 传 before_id 或 cursor=true → 游标(keyset)分页，返回 next_cursor
-//   - 否则 → OFFSET 分页（page_no/page_size），返回 total（兼容既有控制台）
+//   - 默认（未显式带 page_no） / 传 before_id / cursor=true → 游标(keyset)分页，返回 next_cursor
+//   - 仅当显式带 page_no 时 → OFFSET 分页，返回 total（兼容需要随机跳页的旧调用方）
+// ADR-0005 D1：默认不再走 COUNT(*)+OFFSET，改用 keyset，深翻页代价与页码无关；
+// OFFSET 仅保留给显式 page_no 的随机跳页场景。
 pub async fn get_check_results(
     result_service: web::Data<ResultService>,
     query: web::Query<ResultQueryParams>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let internal = |e: diesel::result::Error| {
-        actix_web::error::ErrorInternalServerError(format!("Failed to get check results: {}", e))
-    };
-    // 游标模式：显式 cursor=true 或已带 before_id
-    if query.cursor || query.before_id.is_some() {
+    // 默认走 keyset：显式 cursor、带 before_id，或未显式指定 page_no 都用游标分页
+    let use_keyset = query.cursor || query.before_id.is_some() || query.page_no.is_none();
+    if use_keyset {
         // page_size 复用同一夹取逻辑（1..=500）；page_no 在游标模式下忽略
         let (_, size) = clamp_pagination(None, query.page_size);
-        let list = result_service
-            .get_check_results_keyset(query.monitor_id, query.before_id, size)
-            .map_err(internal)?;
+        let monitor_id = query.monitor_id;
+        let before_id = query.before_id;
+        // 同步 diesel 查询挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+        let svc = result_service.get_ref().clone();
+        let list =
+            run_blocking(move || svc.get_check_results_keyset(monitor_id, before_id, size)).await?;
         // 满页时以最后一条 id 作为下一页游标；不足一页说明已到末页
         let next_cursor = if (list.len() as i64) == size {
             list.last().map(|r| r.id)
@@ -61,9 +64,10 @@ pub async fn get_check_results(
         }));
     }
     let (no, size) = clamp_pagination(query.page_no, query.page_size);
-    let (list, total) = result_service
-        .get_check_results(query.monitor_id, no, size)
-        .map_err(internal)?;
+    let monitor_id = query.monitor_id;
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+    let svc = result_service.get_ref().clone();
+    let (list, total) = run_blocking(move || svc.get_check_results(monitor_id, no, size)).await?;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "OK".to_string(),

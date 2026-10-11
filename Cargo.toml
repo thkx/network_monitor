@@ -40,6 +40,10 @@ dotenvy = "0.15"
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
+# 管理员口令 KDF：由无盐 SHA-256 升级为 argon2id（加盐、抗暴力/GPU）。
+# 只用默认特性（含 password-hash）：盐由现有 uuid v4 随机字节派生（SaltString::encode_b64），
+# 避免再引入 rand/getrandom。校验走 argon2 PHC 字符串（内部常数时间比较）
+argon2 = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"

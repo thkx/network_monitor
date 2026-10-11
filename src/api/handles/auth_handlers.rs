@@ -1,5 +1,4 @@
 // 登录/登出处理器：凭证验证、限流、会话cookie下发与清除
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use actix_web::{HttpRequest, HttpResponse, web};
@@ -7,7 +6,7 @@ use serde::Deserialize;
 
 use crate::auth::{
     AuthConfig, LoginOutcome, SESSION_COOKIE, SessionStore, build_expired_cookie,
-    build_session_cookie,
+    build_session_cookie, client_ip,
 };
 
 #[derive(Debug, Deserialize)]
@@ -29,15 +28,17 @@ pub async fn login(
             "message": "认证未启用（未配置ADMIN_PASSWORD）",
         }));
     }
-    let ip: Option<IpAddr> = req.peer_addr().map(|a| a.ip());
+    // 限流 key 的客户端 IP：trust_proxy 开启时取 X-Forwarded-For 最左 IP，否则 peer_addr
+    // （ADR-0006 E4）；拿不到时在 SessionStore::login 内计入兜底桶（E3）
+    let ip = client_ip(&req, config.trust_proxy);
     // 原子登录：限流检查、凭证验证、失败计数/会话创建在同一次加锁内完成。
     // 旧实现"先检查后记录"分两次加锁，锁间隙不计数，并发突发可在任何失败
     // 被记录前全部通过检查，5次上限被放大；合并后各请求串行判定，上限精确生效
-    let outcome =
-        store
-            .lock()
-            .expect("session锁中毒")
-            .login(ip, &config, &body.username, &body.password);
+    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
+    let outcome = store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .login(ip, &config, &body.username, &body.password);
     match outcome {
         LoginOutcome::Locked => HttpResponse::TooManyRequests().json(serde_json::json!({
             "code": 429,
@@ -70,7 +71,11 @@ pub async fn logout(
     req: HttpRequest,
 ) -> HttpResponse {
     if let Some(c) = req.cookie(SESSION_COOKIE) {
-        store.lock().expect("session锁中毒").remove(c.value());
+        // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
+        store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(c.value());
     }
     HttpResponse::Ok()
         .cookie(build_expired_cookie(config.cookie_secure))

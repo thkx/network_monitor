@@ -1,5 +1,6 @@
 // API 通用响应类型与分页工具：统一返回信封、分页数据结构、分页参数防御、错误转换
 // （从 monitor_handlers 抽出，供各 handler 模块共享，避免跨 handler 的横向依赖）
+use actix_web::web;
 use serde::{Deserialize, Serialize};
 
 // 定义统一的返回数据结构
@@ -35,9 +36,29 @@ pub fn clamp_pagination(page_no: Option<i64>, page_size: Option<i64>) -> (i64, i
     (no, size)
 }
 
-// 统一500错误转换
+// 统一500错误转换：详细错误仅落日志（可能含表名/SQL片段等内部信息），
+// 客户端只回通用文案，避免数据库错误原文泄露到响应体（ADR-0006 E1 脱敏）
 pub fn internal_error(e: diesel::result::Error) -> actix_web::Error {
-    actix_web::error::ErrorInternalServerError(format!("Database error: {}", e))
+    tracing::error!("数据库错误: {}", e);
+    actix_web::error::ErrorInternalServerError("内部错误")
+}
+
+// 在 actix 阻塞线程池执行同步 diesel 操作，收敛 `web::block` + 双层错误映射样板
+// （ADR-0002 A1）：外层 BlockingError（线程池调度/任务 panic）与内层 diesel::Error
+// 都脱敏为通用 500，详细原因落 tracing::error（ADR-0006 E1）。
+// 闭包返回 Result<T, diesel::result::Error>，与各 service/repo 方法签名一致。
+pub async fn run_blocking<F, T>(f: F) -> Result<T, actix_web::Error>
+where
+    F: FnOnce() -> Result<T, diesel::result::Error> + Send + 'static,
+    T: Send + 'static,
+{
+    web::block(f)
+        .await
+        .map_err(|e| {
+            tracing::error!("阻塞任务执行失败: {}", e);
+            actix_web::error::ErrorInternalServerError("内部错误")
+        })?
+        .map_err(internal_error)
 }
 
 #[cfg(test)]

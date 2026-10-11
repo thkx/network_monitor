@@ -10,8 +10,8 @@
 
 use super::notify::{AlertSender, NotifyEngine};
 use super::rules::{
-    detail_summary, evaluate_content, evaluate_response_code, evaluate_threshold,
-    is_target_available,
+    compile_response_code_regex, detail_summary, evaluate_content, evaluate_response_code,
+    evaluate_threshold, is_target_available,
 };
 use crate::database::models::AlertHistoryInsert;
 use crate::database::pool::SqlitePool;
@@ -19,6 +19,7 @@ use crate::database::repositories::alert_history_repo::AlertHistoryRepository;
 use crate::database::repositories::alert_state_repo::AlertStateRepository;
 use crate::domain::CheckResult;
 use crate::domain::{AlertRuleTypes, AlertVerificationRules};
+use regex::Regex;
 use std::sync::Arc;
 
 // 告警引擎：持有通知引擎、告警规则与抑制状态，对外提供统一的check入口
@@ -36,6 +37,10 @@ pub struct AlertsEngine {
     state: Option<(AlertStateRepository, i32)>,
     // 告警历史（Server模式）：触发/恢复各写一行，供控制台回溯；Once/Monitor模式为None
     history: Option<(AlertHistoryRepository, i32)>,
+    // 响应码规则正则的预编译缓存（与 alert_rules.rules 等长、按索引一一对应）：
+    // 规则加载期（with_sender）一次性编译并缓存，evaluate 热路径不再 Regex::new；
+    // 非 ResponseCode 规则或无/非法正则对应 None（非法正则在加载期已记一次 warn）
+    response_code_regexes: Vec<Option<Regex>>,
 }
 
 impl AlertsEngine {
@@ -51,6 +56,16 @@ impl AlertsEngine {
 
     // 注入发送器：生产用NotifyEngine，测试注入stub以覆盖状态机流转（无真实网络）
     fn with_sender(alert_rule: AlertVerificationRules, notify: Box<dyn AlertSender>) -> Self {
+        // 规则加载期一次性预编译响应码规则正则（见字段注释），避免热路径每次评估都 Regex::new。
+        // 仅 ResponseCode 规则的正则有意义，其余规则一律 None
+        let response_code_regexes = alert_rule
+            .rules
+            .iter()
+            .map(|r| match r.rule_type {
+                AlertRuleTypes::ResponseCode => compile_response_code_regex(&r.condition),
+                _ => None,
+            })
+            .collect();
         AlertsEngine {
             alerting: false,
             hit_streak: 0,
@@ -59,6 +74,7 @@ impl AlertsEngine {
             history: None,
             alert_rules: alert_rule,
             notify,
+            response_code_regexes,
         }
     }
 
@@ -195,12 +211,16 @@ impl AlertsEngine {
             return None;
         }
         let target = check_result.target.clone().unwrap_or_default();
-        for single_rule in self.alert_rules.rules.iter() {
+        for (idx, single_rule) in self.alert_rules.rules.iter().enumerate() {
             match single_rule.rule_type {
                 AlertRuleTypes::ResponseCode => {
-                    if let Some(message) =
-                        evaluate_response_code(&target, check_result, &single_rule.condition)
-                    {
+                    // 正则取加载期预编译缓存中与本规则同索引的项（见 response_code_regexes 字段）
+                    if let Some(message) = evaluate_response_code(
+                        &target,
+                        check_result,
+                        &single_rule.condition,
+                        self.response_code_regexes[idx].as_ref(),
+                    ) {
                         return Some(message);
                     }
                 }

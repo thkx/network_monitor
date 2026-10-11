@@ -14,8 +14,55 @@ use crate::monitor::MonitorFactory;
 use crate::scheduler::Scheduler;
 
 use super::response::{
-    DefaultResponseObj, PageData, PaginationParams, clamp_pagination, internal_error,
+    DefaultResponseObj, PageData, PaginationParams, clamp_pagination, internal_error, run_blocking,
 };
+
+// 读接口输出脱敏（ADR-0006 E5）：把配置里 notify_config 的 password/secret 等
+// 敏感字段替换为掩码，仅改读接口返回体，不动落库值。
+// config_json 是序列化后的 MonitorDefinition 字符串，这里反序列化为通用 JSON、
+// 递归按字段名掩码后再序列化回去——对嵌套结构（notify_config.secret /
+// notify_config.email.password）都生效，且不依赖具体字段路径，后续新增渠道也兜得住。
+const SENSITIVE_KEYS: [&str; 2] = ["password", "secret"];
+
+fn mask_sensitive_config(model: &mut crate::database::models::MonitorConfigModel) {
+    let Some(raw) = model.config_json.as_ref() else {
+        return;
+    };
+    // 解析失败（脏配置）时保持原样：脱敏是尽力而为，不因此让读接口报错
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    mask_secrets_in_value(&mut value);
+    if let Ok(s) = serde_json::to_string(&value) {
+        model.config_json = Some(s);
+    }
+}
+
+// 递归扫描 JSON：对名为 password/secret 的非空字段统一掩码为 "***"。
+// 空字符串保持原样（避免把"未配置"误显示成"已配置了某个值"）
+fn mask_secrets_in_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if SENSITIVE_KEYS.iter().any(|s| k.eq_ignore_ascii_case(s)) {
+                    match v {
+                        serde_json::Value::Null => {}
+                        serde_json::Value::String(s) if s.is_empty() => {}
+                        _ => *v = serde_json::Value::String("***".to_string()),
+                    }
+                } else {
+                    mask_secrets_in_value(v);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                mask_secrets_in_value(item);
+            }
+        }
+        _ => {}
+    }
+}
 
 // 获取全部的监控配置处理函数
 pub async fn get_all_monitors(
@@ -28,12 +75,17 @@ pub async fn get_all_monitors(
         .tag
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let (monitors, total) = monitor_service
-        .list_monitors(query.enabled, tag, no, size)
-        .map_err(|e| {
-            actix_web::error::ErrorInternalServerError(format!("Failed to get monitors: {}", e))
-        })?;
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let enabled = query.enabled;
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+    let svc = monitor_service.get_ref().clone();
+    let (mut monitors, total) =
+        run_blocking(move || svc.list_monitors(enabled, tag.as_deref(), no, size)).await?;
+    // 列表返回路径同样脱敏 notify_config 中的 password/secret（E5）
+    for m in monitors.iter_mut() {
+        mask_sensitive_config(m);
+    }
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "OK".to_string(),
@@ -50,9 +102,9 @@ pub async fn get_all_monitors(
 pub async fn get_monitor_tags(
     monitor_service: web::Data<MonitorService>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let tags = monitor_service
-        .get_distinct_tags()
-        .map_err(internal_error)?;
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1）
+    let svc = monitor_service.get_ref().clone();
+    let tags = run_blocking(move || svc.get_distinct_tags()).await?;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "OK".to_string(),
@@ -66,15 +118,19 @@ pub async fn get_monitor_by_id(
     path: web::Path<i32>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
-    let monitor = monitor_service
-        .get_monitor_by_id(id)
-        .map_err(internal_error)?;
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1）
+    let svc = monitor_service.get_ref().clone();
+    let monitor = run_blocking(move || svc.get_monitor_by_id(id)).await?;
     match monitor {
-        Some(m) => Ok(HttpResponse::Ok().json(DefaultResponseObj {
-            code: 200,
-            message: "OK".to_string(),
-            data: m,
-        })),
+        Some(mut m) => {
+            // 读接口输出脱敏：notify_config 的 password/secret 返回掩码（E5）
+            mask_sensitive_config(&mut m);
+            Ok(HttpResponse::Ok().json(DefaultResponseObj {
+                code: 200,
+                message: "OK".to_string(),
+                data: m,
+            }))
+        }
         None => Err(actix_web::error::ErrorNotFound(format!(
             "Monitor {} not found",
             id
@@ -109,7 +165,17 @@ pub async fn create_monitor(
     super::validation::validate_config(&entry)?;
     let insert: MonitorConfigInsert =
         build_monitor_insert(&entry, Arc::unwrap_or_clone(default_interval.into_inner()));
-    let created = match monitor_service.create_monitor(&insert) {
+    // 同步 diesel 写入挪阻塞池（ADR-0002 A1）；此处保留原始 diesel::Error 以识别
+    // 唯一约束冲突（映射 409），故不走 run_blocking（它会把错误脱敏吞掉类型）
+    let svc = monitor_service.get_ref().clone();
+    let insert_for_block = insert.clone();
+    let created = web::block(move || svc.create_monitor(&insert_for_block))
+        .await
+        .map_err(|e| {
+            tracing::error!("创建监控阻塞任务失败: {}", e);
+            actix_web::error::ErrorInternalServerError("内部错误")
+        })?;
+    let created = match created {
         Ok(c) => c,
         Err(e) => {
             // 仅唯一约束冲突（name重复）返回409便于前端提示，错误体保持统一JSON形状；
@@ -180,7 +246,17 @@ pub async fn update_monitor(
         // 分组标签随更新一并写入（与create一致，空串归一为None）
         tag: crate::database::services::normalize_tag(entry.tag.as_deref()),
     };
-    let affected = match monitor_service.update_monitor(id, &update) {
+    // 同步 diesel 写入挪阻塞池（ADR-0002 A1）；保留原始 diesel::Error 以识别
+    // 唯一约束冲突（映射 409），故不走 run_blocking
+    let svc = monitor_service.get_ref().clone();
+    let update_for_block = update.clone();
+    let affected = web::block(move || svc.update_monitor(id, &update_for_block))
+        .await
+        .map_err(|e| {
+            tracing::error!("更新监控阻塞任务失败: {}", e);
+            actix_web::error::ErrorInternalServerError("内部错误")
+        })?;
+    let affected = match affected {
         Ok(n) => n,
         Err(e) => {
             // 与create镜像：仅唯一约束冲突（name重复）返回409便于前端提示，
@@ -227,7 +303,9 @@ pub async fn delete_monitor(
     path: web::Path<i32>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
-    let affected = monitor_service.delete_monitor(id).map_err(internal_error)?;
+    // 同步 diesel 写入挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+    let svc = monitor_service.get_ref().clone();
+    let affected = run_blocking(move || svc.delete_monitor(id)).await?;
     if affected == 0 {
         return Err(actix_web::error::ErrorNotFound(format!(
             "Monitor {} not found",
@@ -235,7 +313,11 @@ pub async fn delete_monitor(
         )));
     }
     // 清理该监控的内存指标：删除是id永久消失的路径，否则/metrics会持续输出陈旧entry
-    metrics.lock().expect("metrics锁中毒").remove(id);
+    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
+    metrics
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(id);
     // 热更新：重建监控任务，被删除的监控随之停止
     reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
@@ -259,9 +341,10 @@ pub async fn update_monitor_enabled(
     body: web::Json<EnabledBody>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
-    let affected = monitor_service
-        .set_enabled(id, body.enabled)
-        .map_err(internal_error)?;
+    // 同步 diesel 写入挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+    let svc = monitor_service.get_ref().clone();
+    let enabled = body.enabled;
+    let affected = run_blocking(move || svc.set_enabled(id, enabled)).await?;
     if affected == 0 {
         return Err(actix_web::error::ErrorNotFound(format!(
             "Monitor {} not found",
@@ -286,10 +369,14 @@ pub async fn run_monitor_once(
     default_interval: web::Data<u64>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
-    let row = monitor_service
-        .get_monitor_by_id(id)
-        .map_err(internal_error)?
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+    let svc = monitor_service.get_ref().clone();
+    let row = run_blocking(move || svc.get_monitor_by_id(id))
+        .await?
         .ok_or_else(|| actix_web::error::ErrorNotFound(format!("监控 {} 不存在", id)))?;
+    // 单次执行的超时上限：取配置 timeout_ms + 10s 余量（覆盖建连/收尾），
+    // 兜底 30s；避免个别卡死的探测把请求无限挂起
+    let run_timeout_ms = (row.timeout_ms.max(0) as u64).saturating_add(10_000);
     let config_json = row
         .config_json
         .clone()
@@ -306,35 +393,58 @@ pub async fn run_monitor_once(
     let monitor = MonitorFactory::create_monitor(config.monitor_type);
     // 单次执行：复用Once模式的执行封装，结果完整返回给前端
     let mut rx = AsyncMonitor::create_once_monitoring(monitor, config).await;
-    let Some(result) = rx.recv().await else {
-        return Err(actix_web::error::ErrorInternalServerError(
-            "监控执行未返回结果",
-        ));
+    // ADR-0004 C2：用 timeout 包裹 recv，防止卡死探测把 HTTP 请求无限挂起；
+    // 超时返回 504（Gateway Timeout），语义上"上游探测未在时限内返回"
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_millis(run_timeout_ms),
+        rx.recv(),
+    )
+    .await
+    {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            return Err(actix_web::error::ErrorInternalServerError(
+                "监控执行未返回结果",
+            ));
+        }
+        Err(_) => {
+            tracing::error!("手动执行监控超时 (monitor_id={}, timeout={}ms)", id, run_timeout_ms);
+            return Err(actix_web::error::ErrorGatewayTimeout("监控执行超时"));
+        }
     };
     // 指标与持久化与主消费循环同源，手动执行不影响数据一致性
+    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
     {
         let (status, response_time, _code) = result.log_fields();
-        metrics.lock().expect("metrics锁中毒").record(
-            &ResultRoute {
-                name: name.clone(),
-                monitor_id: Some(id),
-            },
-            &result.monitor_type.to_string(),
-            status,
-            u64::try_from(response_time).unwrap_or(u64::MAX),
-        );
+        metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(
+                &ResultRoute {
+                    name: name.clone(),
+                    monitor_id: Some(id),
+                },
+                &result.monitor_type.to_string(),
+                status,
+                u64::try_from(response_time).unwrap_or(u64::MAX),
+            );
     }
-    // 手动执行即时单条落库（不走攒批，结果需立即可查）
-    if let Err(e) = result_service.persist_check(id, &result) {
-        tracing::error!("监控结果持久化失败 (monitor_id={}): {}", id, e);
-    }
+    // 响应字段先于落库取出：持久化会把 result move 进阻塞闭包
     let (status, response_time, status_code) = result.log_fields();
     let detail_json = serde_json::to_value(&result.details).ok();
+    let check_id_hex = format!("{:x}", result.id);
+    // 手动执行即时单条落库（不走攒批，结果需立即可查）；同步 diesel 挪阻塞池（A1）
+    let result_svc = result_service.get_ref().clone();
+    match web::block(move || result_svc.persist_check(id, &result)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::error!("监控结果持久化失败 (monitor_id={}): {}", id, e),
+        Err(e) => tracing::error!("持久化阻塞任务失败 (monitor_id={}): {}", id, e),
+    }
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
         code: 200,
         message: "OK".to_string(),
         data: serde_json::json!({
-            "check_id": format!("{:x}", result.id),
+            "check_id": check_id_hex,
             "monitor": name,
             "status": status,
             "response_time": response_time,

@@ -82,7 +82,7 @@ impl MetricsRegistry {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut map = self.inner.lock().expect("metrics锁中毒");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map.entry(id).or_insert_with(|| {
             (
                 MonitorMetrics::default(),
@@ -113,21 +113,31 @@ impl MetricsRegistry {
     pub fn remove(&self, monitor_id: i32) {
         self.inner
             .lock()
-            .expect("metrics锁中毒")
+            .unwrap_or_else(|e| e.into_inner())
             .remove(&monitor_id);
     }
 
     // 渲染 Prometheus 文本格式（exposition version 0.0.4）
     // alerting：alert_state表的当前抑制状态快照；None时省略 monitor_alerting 家族
+    // ADR-0002 A3：持锁期间只做轻量快照 clone（按 id 升序），随即解锁；
+    // format!/write! 等字符串拼接全在锁外进行，缩短持锁时间、降低 /metrics 抓取
+    // 与消费循环 record 的锁争用。输出内容与此前逐行 format! 完全一致。
     pub fn render(&self, alerting: Option<&[(i32, bool)]>) -> String {
-        let map = self.inner.lock().expect("metrics锁中毒");
+        use std::fmt::Write as _;
+        // 持锁快照：拷贝出 (id, metrics, meta) 的有序列表后立即释放锁
+        let snapshot: Vec<(i32, MonitorMetrics, Meta)> = {
+            let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ids: Vec<i32> = map.keys().copied().collect();
+            ids.sort_unstable();
+            ids.into_iter()
+                .filter_map(|id| map.get(&id).map(|(m, meta)| (id, m.clone(), meta.clone())))
+                .collect()
+        };
         let alerting_map: HashMap<i32, bool> = alerting
             .map(|v| v.iter().copied().collect())
             .unwrap_or_default();
-        // 按monitor_id排序输出，保证抓取间样本顺序稳定
-        let mut ids: Vec<i32> = map.keys().copied().collect();
-        ids.sort_unstable();
 
+        // 复用单个缓冲，write! 原地追加（替代每行 push_str(&format!(...)) 的临时分配）
         let mut out = String::new();
         out.push_str("# HELP network_monitor_up 目标最近一次检查是否可用（1可用/0不可用）\n");
         out.push_str("# TYPE network_monitor_up gauge\n");
@@ -150,59 +160,62 @@ impl MetricsRegistry {
             out.push_str("# TYPE network_monitor_alerting gauge\n");
         }
 
-        for id in ids {
-            let Some((m, meta)) = map.get(&id) else {
-                continue;
-            };
+        for (id, m, meta) in &snapshot {
+            let id = *id;
             let labels = format!(
                 "monitor_id=\"{}\",name=\"{}\",type=\"{}\"",
                 id,
                 escape_label(&meta.name),
                 escape_label(&meta.monitor_type)
             );
-            out.push_str(&format!("network_monitor_up{{{}}} {}\n", labels, m.last_up));
-            out.push_str(&format!(
+            let _ = write!(out, "network_monitor_up{{{}}} {}\n", labels, m.last_up);
+            let _ = write!(
+                out,
                 "network_monitor_checks_total{{{labels},status=\"ok\"}} {}\n",
                 m.checks_ok_total
-            ));
-            out.push_str(&format!(
+            );
+            let _ = write!(
+                out,
                 "network_monitor_checks_total{{{labels},status=\"failed\"}} {}\n",
                 m.checks_failed_total
-            ));
-            out.push_str(&format!(
+            );
+            let _ = write!(
+                out,
                 "network_monitor_last_response_time_milliseconds{{{labels}}} {}\n",
                 m.last_response_time_ms
-            ));
-            out.push_str(&format!(
+            );
+            let _ = write!(
+                out,
                 "network_monitor_last_check_timestamp_seconds{{{labels}}} {}\n",
                 m.last_check_ts
-            ));
+            );
             // 直方图：桶计数渲染为累计分布（le标签），末桶+Inf等于总次数
             let mut cumulative = 0u64;
             for (b, &c) in DURATION_BUCKETS_SECS.iter().zip(m.duration.counts.iter()) {
                 cumulative += c;
-                out.push_str(&format!(
+                let _ = write!(
+                    out,
                     "network_monitor_check_duration_seconds_bucket{{{labels},le=\"{b}\"}} {cumulative}\n"
-                ));
+                );
             }
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "network_monitor_check_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}\n",
                 m.duration.count
-            ));
-            out.push_str(&format!(
+            );
+            let _ = write!(
+                out,
                 "network_monitor_check_duration_seconds_sum{{{labels}}} {}\n",
                 m.duration.sum_secs
-            ));
-            out.push_str(&format!(
+            );
+            let _ = write!(
+                out,
                 "network_monitor_check_duration_seconds_count{{{labels}}} {}\n",
                 m.duration.count
-            ));
+            );
             if alerting.is_some() {
                 let alerting_v = i32::from(alerting_map.get(&id).copied().unwrap_or(false));
-                out.push_str(&format!(
-                    "network_monitor_alerting{{{labels}}} {}\n",
-                    alerting_v
-                ));
+                let _ = write!(out, "network_monitor_alerting{{{labels}}} {}\n", alerting_v);
             }
         }
         out

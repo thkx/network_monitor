@@ -10,6 +10,84 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::Mailbox,
     message::header::ContentType, transport::smtp::authentication::Credentials,
 };
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+// SMTP连接/操作超时：避免对无响应的SMTP服务器无限期挂起，拖住后台重试任务
+const SMTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+// 复用SMTP传输器：lettre的AsyncSmtpTransport内部持有连接池，每封邮件/每次重试都 build()
+// 会重复构造TLS配置与连接池纯属浪费。按 (host, port, username, password) 缓存复用——
+// 键包含凭证，确保不同配置互不串用；传输器 clone 很廉价（内部Arc）。
+// 仅缓存构建成功的传输器；loopback明文凭证拦截失败的配置永远进不了缓存
+static SMTP_TRANSPORTS: OnceLock<Mutex<HashMap<TransportKey, AsyncSmtpTransport<Tokio1Executor>>>> =
+    OnceLock::new();
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TransportKey {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+}
+
+fn transport_cache() -> &'static Mutex<HashMap<TransportKey, AsyncSmtpTransport<Tokio1Executor>>> {
+    SMTP_TRANSPORTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// 构建一个SMTP传输器：端口语义与 loopback 明文凭证拦截逻辑保持原状，并显式设置超时。
+// 仅在缓存未命中时调用（见 get_transport）
+fn build_transport(cfg: &EmailNotifyConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
+    let host = cfg.smtp_host.as_str();
+    let builder = match cfg.smtp_port {
+        465 => AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+            .map_err(|e| format!("创建SMTP传输器失败: {e}"))?,
+        587 => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+            .map_err(|e| format!("创建STARTTLS传输器失败: {e}"))?,
+        p => {
+            // 明文连接下发送凭证=授权码明文过网，被窃听即泄露。
+            // 但loopback（localhost/127.0.0.1/::1）流量不出本机，明文认证到本地relay是安全且常见的用法；
+            // 仅当明文发往非loopback主机且带凭证时才拒绝——避免授权码在真实网络上裸奔
+            if !cfg.password.is_empty() && !is_loopback_host(host) {
+                return Err(format!(
+                    "SMTP端口 {p} 为明文连接且目标 {host} 非本机，禁止发送凭证（授权码会明文过网）；\
+                     请改用 465(隐式TLS)/587(STARTTLS)，或清空 password 走免认证relay"
+                ));
+            }
+            tracing::warn!("SMTP端口 {p} 使用明文连接（建议465/587）");
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+        }
+    }
+    .port(cfg.smtp_port)
+    // 显式连接/操作超时：无响应服务器不会把后台重试任务无限期挂住
+    .timeout(Some(SMTP_TIMEOUT));
+    let builder = if cfg.password.is_empty() {
+        builder
+    } else {
+        builder.credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
+    };
+    Ok(builder.build())
+}
+
+// 获取（优先复用缓存的）SMTP传输器。缓存未命中时构建一次并写入缓存。
+// loopback明文凭证拦截在 build_transport 内完成，被拒配置不进缓存，故命中项必为合法配置
+fn get_transport(cfg: &EmailNotifyConfig) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
+    let key = TransportKey {
+        host: cfg.smtp_host.clone(),
+        port: cfg.smtp_port,
+        username: cfg.username.clone(),
+        password: cfg.password.clone(),
+    };
+    // 读路径：命中直接克隆复用（克隆廉价，持锁期间不跨await）
+    if let Some(transport) = transport_cache().lock().unwrap().get(&key).cloned() {
+        return Ok(transport);
+    }
+    // 未命中：构建一次（含loopback拦截），成功后写入缓存并返回
+    let transport = build_transport(cfg)?;
+    let mut cache = transport_cache().lock().unwrap();
+    Ok(cache.entry(key).or_insert(transport).clone())
+}
 
 // 目标主机是否为loopback（本机）：明文认证到本机relay是安全的，凭证不出网卡。
 // 直接IP按IpAddr::is_loopback判定；主机名仅识别常见的localhost字面量
@@ -48,33 +126,9 @@ pub async fn send_mail(cfg: &EmailNotifyConfig, subject: &str, body: &str) -> Re
         .body(body.to_string())
         .map_err(|e| format!("构建邮件失败: {e}"))?;
 
-    let host = cfg.smtp_host.as_str();
-    let builder = match cfg.smtp_port {
-        465 => AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-            .map_err(|e| format!("创建SMTP传输器失败: {e}"))?,
-        587 => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-            .map_err(|e| format!("创建STARTTLS传输器失败: {e}"))?,
-        p => {
-            // 明文连接下发送凭证=授权码明文过网，被窃听即泄露。
-            // 但loopback（localhost/127.0.0.1/::1）流量不出本机，明文认证到本地relay是安全且常见的用法；
-            // 仅当明文发往非loopback主机且带凭证时才拒绝——避免授权码在真实网络上裸奔
-            if !cfg.password.is_empty() && !is_loopback_host(host) {
-                return Err(format!(
-                    "SMTP端口 {p} 为明文连接且目标 {host} 非本机，禁止发送凭证（授权码会明文过网）；\
-                     请改用 465(隐式TLS)/587(STARTTLS)，或清空 password 走免认证relay"
-                ));
-            }
-            tracing::warn!("SMTP端口 {p} 使用明文连接（建议465/587）");
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
-        }
-    }
-    .port(cfg.smtp_port);
-    let builder = if cfg.password.is_empty() {
-        builder
-    } else {
-        builder.credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()))
-    };
-    let transporter: AsyncSmtpTransport<Tokio1Executor> = builder.build();
+    // 按配置复用（或首次构建并缓存）传输器——不再每封邮件/每次重试都 build()。
+    // loopback明文凭证拦截在 get_transport→build_transport 内保持原状
+    let transporter = get_transport(cfg)?;
     transporter
         .send(email)
         .await

@@ -4,6 +4,9 @@ use regex::Regex;
 
 use crate::domain::{AlertRuleTypes, ContentVerificationRules, MonitorDefinition, NotifyType};
 
+// 内容校验正则的长度上限（ADR-0006 E8）：regex crate 线性匹配风险低，加长度上限兜底
+const MAX_REGEX_LEN: usize = 1000;
+
 // 创建/更新前的配置校验：非法配置返回400，避免脏配置入库
 pub fn validate_config(entry: &MonitorDefinition) -> Result<(), actix_web::Error> {
     // interval下限1秒：0会造成高频空转甚至busy-loop轰炸目标；上限1天防误配
@@ -28,14 +31,22 @@ pub fn validate_config(entry: &MonitorDefinition) -> Result<(), actix_web::Error
         ));
     }
     // 内容规则里的正则：非法正则拒绝入库（引擎侧另有兜底不panic）
+    // ReDoS 兜底（ADR-0006 E8）：regex crate 为线性时间引擎，风险低，但仍对
+    // 正则长度设上限，避免超长模式带来的编译/内存开销与潜在滥用
     for rule in entry.content_evaluation_rules.iter().flatten() {
-        if matches!(rule.rule_type, ContentVerificationRules::Regex)
-            && let Err(e) = Regex::new(&rule.rule_content)
-        {
-            return Err(actix_web::error::ErrorBadRequest(format!(
-                "非法正则表达式 {:?}: {}",
-                rule.rule_content, e
-            )));
+        if matches!(rule.rule_type, ContentVerificationRules::Regex) {
+            if rule.rule_content.len() > MAX_REGEX_LEN {
+                return Err(actix_web::error::ErrorBadRequest(format!(
+                    "正则表达式过长（上限 {} 字符）",
+                    MAX_REGEX_LEN
+                )));
+            }
+            if let Err(e) = Regex::new(&rule.rule_content) {
+                return Err(actix_web::error::ErrorBadRequest(format!(
+                    "非法正则表达式 {:?}: {}",
+                    rule.rule_content, e
+                )));
+            }
         }
     }
     // 告警配置校验：防抖参数范围 + 通知渠道专项 + THRESHOLD规则的阈值条件

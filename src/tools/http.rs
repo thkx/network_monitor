@@ -45,25 +45,39 @@ fn shared_tls_connector() -> Option<&'static TokioTlsConnector> {
         .as_ref()
 }
 
-// 计算 性能监控相关数据 DNS TCP TLS 三个数据耗时 以及在连接过程中SSL证书相关信息
+// 计算 性能监控相关数据 DNS TCP TLS 三个数据耗时 以及在连接过程中SSL证书相关信息。
+// budget 为本次探测的总预算（deadline，由调用方传入 config.timeout）：此前对每个解析 IP
+// 串行做 TCP 3s + TLS 3s 且无整体上界，最坏可远超请求超时。改为：
+//   1) 命中首个可连地址（TCP 成功）即停止，不再遍历其余地址；
+//   2) 限制最多尝试的地址数量，防止超大 A 记录拖垮探测；
+//   3) 每一步（DNS/TCP/TLS）的超时取「剩余预算」与原固定值（3s）的较小者。
 pub async fn get_dns_tcp_tls_performance(
     url: &str,
+    budget: Duration,
 ) -> Result<DnsTcpTlsPerformance, Box<dyn std::error::Error>> {
+    // 探测起点：后续各步按「总预算 - 已耗时」推导剩余预算
+    let probe_start = Instant::now();
+    let remaining = |start: &Instant| budget.saturating_sub(start.elapsed());
+    // 单步固定上界（与改造前一致），各步实际超时取其与剩余预算的较小者
+    let step_cap = Duration::from_secs(3);
+
     // 使用Url进行解析相关的地址
     let url = reqwest::Url::parse(url)?;
     let host = url.host_str().ok_or("Invalid URL")?;
     let port = url.port_or_known_default().unwrap_or(80);
     let resolver = system_resolver().ok_or("DNS resolver unavailable")?;
-    let dns_lookup_time = std::time::Instant::now();
-    let ips = resolver.lookup_ip(host).await?;
+    let dns_lookup_time = Instant::now();
+    // DNS 解析同样纳入总预算：剩余预算与固定上界取较小者
+    let dns_timeout = remaining(&probe_start).min(step_cap);
+    let ips = timeout(dns_timeout, resolver.lookup_ip(host))
+        .await
+        .map_err(|_| "DNS lookup timed out")??;
     // 开始设置DNS的缓存时间
     let dns_lookup_ms = dns_lookup_time.elapsed().as_millis();
     // 开始设置TCP的缓存时间以及 TLS的时间
-    // 遍历相关的IP 地址 取其中最小的一个时间即可
     let mut tls_min_time: Option<u128> = None;
     let mut tcp_min_time: Option<u128> = None;
 
-    let per_addr_timeout = Duration::from_secs(3);
     let is_https = url.scheme() == "https";
     // 复用进程级缓存的 TLS 连接器（HTTPS 才需要）
     let tls_connector = if is_https {
@@ -72,27 +86,37 @@ pub async fn get_dns_tcp_tls_performance(
         None
     };
     let mut ssl_certificate_info: Option<crate::domain::CertificateInfo> = None;
-    for ip in ips.iter() {
+    // 最多尝试的地址数量：解析结果可能很多，限制尝试次数避免探测被拖垮
+    const MAX_ADDR_ATTEMPTS: usize = 3;
+    for ip in ips.iter().take(MAX_ADDR_ATTEMPTS) {
+        // 预算耗尽则停止尝试
+        let rem = remaining(&probe_start);
+        if rem.is_zero() {
+            break;
+        }
         let addr = std::net::SocketAddr::new(ip, port);
         let start_tcp = std::time::Instant::now();
-        // 设置一个超时时间，避免个别IP无法连接阻塞后续的连接
-        let tcp_res = tokio::time::timeout(per_addr_timeout, TcpStream::connect(addr)).await;
+        // TCP 连接超时取「剩余预算」与固定上界的较小者
+        let tcp_timeout = rem.min(step_cap);
+        let tcp_res = timeout(tcp_timeout, TcpStream::connect(addr)).await;
         let tcp_stream = match tcp_res {
             Ok(Ok(stream)) => {
                 let ms = start_tcp.elapsed().as_millis();
                 // 设置TCP链接时间
-                tcp_min_time = tcp_min_time.map_or(Some(ms), |min| Some(min.min(ms)));
+                tcp_min_time = Some(ms);
                 stream
             }
             _ => continue, // 超时或连接失败，尝试下一个地址
         };
         if let Some(tls) = tls_connector {
+            // TLS 握手超时同样取「剩余预算」与固定上界的较小者
+            let tls_timeout = remaining(&probe_start).min(step_cap);
             let hs_start = Instant::now();
-            let hs_res = timeout(per_addr_timeout, tls.connect(host, tcp_stream)).await;
+            let hs_res = timeout(tls_timeout, tls.connect(host, tcp_stream)).await;
             if let Ok(Ok(_tls_stream)) = hs_res {
                 let ms = hs_start.elapsed().as_millis();
                 // 设置TLS的连接时间
-                tls_min_time = tls_min_time.map_or(Some(ms), |min| Some(min.min(ms)));
+                tls_min_time = Some(ms);
                 // 检测证书有效性可以在这里进行
                 if ssl_certificate_info.is_none()
                     && let Some(cert) = _tls_stream.get_ref().peer_certificate()?
@@ -131,6 +155,8 @@ pub async fn get_dns_tcp_tls_performance(
                 }
             }
         }
+        // 命中首个可连地址（TCP 已成功）即停止，不再尝试其余地址
+        break;
     }
     let tcp = tcp_min_time.ok_or("all TCP connect attempts failed")?;
     let tls = if is_https {

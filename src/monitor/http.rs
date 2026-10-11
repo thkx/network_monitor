@@ -12,33 +12,67 @@ use crate::tools::get_dns_tcp_tls_performance;
 use regex::Regex;
 use reqwest::Client;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+// 响应体读取上限：仅用于内容/业务字段校验，无需整段加载。超出部分截断，
+// 防止超大/无上限响应撑爆内存、拖垮 check。256 KB 足够覆盖常见校验场景。
+const MAX_BODY_BYTES: usize = 256 * 1024;
+
 pub struct HttpMonitor {
-    client: Client,
+    // 构建失败时为 None：此前 .build().expect(...) 会 panic 掉整个任务，
+    // 改为缓存失败态，在 check 返回失败结果而非崩溃（见 new）。
+    client: Option<Client>,
+    // 内容校验正则的进程内缓存（按模式串去重）：此前每次 check、每条规则都 Regex::new，
+    // 正则编译在热路径上重复发生。改为首次遇到即编译并缓存，后续 check 直接复用；
+    // 非法正则缓存为 None（并记一次 warn），不在热路径反复尝试编译、也不 panic。
+    // check 取 &self（trait 契约），用 Mutex 提供内部可变性；单任务串行调用，锁无竞争。
+    regex_cache: Mutex<HashMap<String, Option<Regex>>>,
 }
 impl HttpMonitor {
     pub fn new() -> Self {
-        // 创建一个Client，方便后续进行URL调用
+        // 创建一个Client，方便后续进行URL调用；构建失败不再 panic，降级为 None
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(5)) // 重定向次数限制为5次
+            .build()
+            .map_err(|e| tracing::error!("HTTP client 构建失败，HTTP监控将判为失败: {e}"))
+            .ok();
         HttpMonitor {
-            client: Client::builder()
-                .redirect(reqwest::redirect::Policy::limited(5)) // 重定向次数限制为5次
-                .build()
-                .expect("Failed to create HTTP client"),
+            client,
+            regex_cache: Mutex::new(HashMap::new()),
         }
     }
-    // 按 method/headers/body 组装一个待发送的 HTTP 请求（依赖常驻 client，故为方法）
-    pub fn build_request(&self, config: &HttpMonitorConfig) -> reqwest::RequestBuilder {
+    // 取（并按需编译缓存）一个正则：命中缓存直接复用；首次编译失败记一次 warn 并缓存 None。
+    // 返回"该模式是否匹配 body"，与此前"非法正则视为未命中"的语义保持一致。
+    fn regex_is_match(&self, pattern: &str, body: &str) -> bool {
+        let mut cache = self.regex_cache.lock().unwrap();
+        let compiled = cache.entry(pattern.to_string()).or_insert_with(|| {
+            match Regex::new(pattern) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!("内容校验正则非法，视为未命中: pattern={pattern:?}, err={e}");
+                    None
+                }
+            }
+        });
+        compiled.as_ref().map(|re| re.is_match(body)).unwrap_or(false)
+    }
+    // 按 method/headers/body 组装一个待发送的 HTTP 请求（client 由调用方从常驻实例取得）
+    pub fn build_request(
+        &self,
+        client: &Client,
+        config: &HttpMonitorConfig,
+    ) -> reqwest::RequestBuilder {
         //   创建一个http 请求
         let mut request_client = match config.method {
-            HttpMethodTypes::Get => self.client.get(config.url.as_str()),
-            HttpMethodTypes::Post => self.client.post(config.url.as_str()),
-            HttpMethodTypes::Put => self.client.put(config.url.as_str()),
-            HttpMethodTypes::Delete => self.client.delete(config.url.as_str()),
-            HttpMethodTypes::Head => self.client.head(config.url.as_str()),
-            HttpMethodTypes::Patch => self.client.patch(config.url.as_str()),
-            _ => self.client.get(config.url.as_str()), // 默认使用 GET 方法
+            HttpMethodTypes::Get => client.get(config.url.as_str()),
+            HttpMethodTypes::Post => client.post(config.url.as_str()),
+            HttpMethodTypes::Put => client.put(config.url.as_str()),
+            HttpMethodTypes::Delete => client.delete(config.url.as_str()),
+            HttpMethodTypes::Head => client.head(config.url.as_str()),
+            HttpMethodTypes::Patch => client.patch(config.url.as_str()),
+            _ => client.get(config.url.as_str()), // 默认使用 GET 方法
         };
 
         // 根据配置信息  设置超时时间
@@ -166,10 +200,11 @@ fn check_security_headers_ok(headers: &reqwest::header::HeaderMap) -> bool {
 }
 
 // 创建一个校验响应内容监控结果的函数
-// 创建内容验证结果
+// 创建内容验证结果；regex_match 由调用方注入（复用 HttpMonitor 的正则缓存，避免热路径编译）
 fn create_content_verification_result(
     body: &str,
     rules: &Option<Vec<ContentVerificationRulesSingle>>,
+    regex_match: &dyn Fn(&str, &str) -> bool,
 ) -> ContentVerificationResult {
     // 判空处理
     if rules.is_none() || body.is_empty() {
@@ -193,11 +228,8 @@ fn create_content_verification_result(
             ContentVerificationRules::Contains => body.contains(rule_content),
             // 是否不包含哪些内容？
             ContentVerificationRules::NotContains => !body.contains(rule_content),
-            // 匹配正则表达式（非法正则视为未命中，不 panic；API 层已预校验，这里兜底）
-            ContentVerificationRules::Regex => match Regex::new(rule_content) {
-                Ok(regex) => regex.is_match(body),
-                Err(_) => false,
-            },
+            // 匹配正则表达式（复用缓存编译；非法正则视为未命中，不 panic）
+            ContentVerificationRules::Regex => regex_match(rule_content, body),
             _ => false,
         };
         get_content_verify_result(
@@ -267,9 +299,13 @@ fn create_advanced_availability_result(body: &str, fields: &[String]) -> Advance
 }
 
 // 采集 DNS/TCP/TLS 分段耗时与证书信息：另建探测连接的近似值，
-// 失败降级为默认零值（不影响主请求的可用性判定）
-async fn collect_timings(target: &str) -> (u128, u128, u128, Option<CertificateInfo>) {
-    get_dns_tcp_tls_performance(target)
+// 失败降级为默认零值（不影响主请求的可用性判定）。
+// budget 为探测总预算（取 config.timeout），用于给 DNS/TCP/TLS 各步设整体上界。
+async fn collect_timings(
+    target: &str,
+    budget: Duration,
+) -> (u128, u128, u128, Option<CertificateInfo>) {
+    get_dns_tcp_tls_performance(target, budget)
         .await
         .unwrap_or_default()
 }
@@ -287,6 +323,7 @@ fn assemble_success(
     timings: (u128, u128, u128, Option<CertificateInfo>),
     ttfb_ms: u128,
     total_time: u128,
+    regex_match: &dyn Fn(&str, &str) -> bool,
 ) -> HttpMonitorResult {
     let (dns_lookup_time, tcp_connect_time, tls_handshake_time, ssl_certificate_info) = timings;
     // 客户端可实测的指标：TTFB（send返回）、内容下载（total-ttfb）、总耗时
@@ -310,7 +347,7 @@ fn assemble_success(
         response_headers: create_headers_result(headers),
         performance_timings,
         certificate_info: ssl_certificate_info.unwrap_or_default(),
-        content_verification: create_content_verification_result(body, &detail.rules),
+        content_verification: create_content_verification_result(body, &detail.rules, regex_match),
         advanced_available: create_advanced_availability_result(
             body,
             &detail.business_metric_fields,
@@ -370,6 +407,29 @@ fn charset_from_content_type(content_type: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+// 限长读取响应体字节并按 UTF-8 lossy 解码：用 Response::chunk 逐块累积（无需 stream feature），
+// 达到 limit 立即截断停止，不再继续拉取后续块；读取出错则按已读部分返回。
+// 内容/业务校验只需前若干字节，无需整段加载——避免无上限 text() 被超大响应撑爆内存。
+async fn read_body_limited(response: &mut reqwest::Response, limit: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = limit.saturating_sub(buf.len());
+                if chunk.len() >= remaining {
+                    // 命中上限：仅取到 limit 处，截断后停止
+                    buf.extend_from_slice(&chunk[..remaining]);
+                    break;
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break, // 响应体读取完毕
+            Err(_) => break,   // 读取出错：按已读部分返回（可用性由其他字段判定）
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 //  下面的话 就是要实现具体的check方法了
 #[async_trait::async_trait]
 impl Monitor for HttpMonitor {
@@ -385,28 +445,45 @@ impl Monitor for HttpMonitor {
         // 来处理具体的HTTP监控的类型数据
         match config.details {
             MonitorConfigDetail::Http(ref detail) => {
+                // 常驻 client 构建失败（见 new）时本次检查判为失败，不 panic
+                let Some(client) = self.client.as_ref() else {
+                    tracing::error!("HTTP client 不可用，本次检查判为失败");
+                    return (
+                        false,
+                        CheckResultDetail::Http(HttpMonitorResult::default()),
+                    );
+                };
                 // 发送HTTP请求到Target地址
-                let request_client = self.build_request(detail);
+                let request_client = self.build_request(client, detail);
                 // 记录请求开始时间，用于统计总耗时等性能指标
                 let start_time_instant = Instant::now();
                 // 发送请求，来匹配返回的结果
                 match request_client.send().await {
-                    Ok(response) => {
+                    Ok(mut response) => {
                         // send() 返回即已收到响应头，此前耗时近似首字节时间（TTFB）
                         let ttfb_ms = start_time_instant.elapsed().as_millis();
-                        // 另建探测连接采集 dns/tcp/tls 近似耗时与证书（可按配置关闭省开销）
+                        // 另建探测连接采集 dns/tcp/tls 近似耗时与证书（可按配置关闭省开销）；
+                        // 探测总预算取 config 超时，避免探测自身无上界拖垮 check
                         let timings = if detail.collect_timings {
-                            collect_timings(config.target.as_ref().unwrap()).await
+                            collect_timings(
+                                config.target.as_ref().unwrap(),
+                                Duration::from_millis(detail.timeout),
+                            )
+                            .await
                         } else {
                             Default::default()
                         };
-                        // response 后续被 text() 取走所有权，这里先抽出需要的字段
+                        // response 后续被按块读取取走所有权，这里先抽出需要的字段
                         let status_code = response.status().as_u16();
                         let version = response.version();
                         let headers = response.headers().clone();
                         let content_length = response.content_length();
-                        let body = response.text().await.unwrap_or_default();
+                        // 限长读取响应体：累积到 MAX_BODY_BYTES 即截断，避免无上限 text() 撑爆内存。
+                        // 用 Response::chunk 流式累积（无需 stream feature）；按 UTF-8 lossy 解码供
+                        // 内容/业务字段校验使用（JSON 本就是 UTF-8，json-path 抽取不受影响）。
+                        let body = read_body_limited(&mut response, MAX_BODY_BYTES).await;
                         let total_time = start_time_instant.elapsed().as_millis();
+                        let regex_match = |pattern: &str, text: &str| self.regex_is_match(pattern, text);
                         (
                             true, // 监控任务执行成功；目标是否可用看 basic_available.is_reachable
                             CheckResultDetail::Http(assemble_success(
@@ -419,6 +496,7 @@ impl Monitor for HttpMonitor {
                                 timings,
                                 ttfb_ms,
                                 total_time,
+                                &regex_match,
                             )),
                         )
                     }
@@ -729,6 +807,7 @@ mod tests {
             (1, 2, 3, None), // dns/tcp/tls 探测值 + 无证书
             40,              // ttfb
             100,             // total
+            &|_, _| false,   // 无规则，正则匹配器不会被调用
         );
         assert_eq!(r.basic_available.res_status_code, Some(200));
         assert!(r.basic_available.is_reachable);

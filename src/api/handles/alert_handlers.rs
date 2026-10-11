@@ -4,7 +4,7 @@ use actix_web::{HttpResponse, web};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::response::{DefaultResponseObj, clamp_pagination, internal_error};
+use super::response::{DefaultResponseObj, clamp_pagination, run_blocking};
 use super::result_handlers::CursorPageData;
 use crate::database::pool::SqlitePool;
 use crate::database::repositories::alert_history_repo::AlertHistoryRepository;
@@ -24,10 +24,14 @@ pub async fn get_alerts(
 ) -> Result<HttpResponse, actix_web::Error> {
     // page_size 复用统一夹取逻辑（1..=500）；page_no 在游标模式下无意义
     let (_, size) = clamp_pagination(None, query.page_size);
-    let repo = AlertHistoryRepository::new(pool.get_ref().clone());
-    let list = repo
-        .get_history(query.monitor_id, query.before_id, size)
-        .map_err(internal_error)?;
+    let monitor_id = query.monitor_id;
+    let before_id = query.before_id;
+    // 同步 diesel 查询挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
+    let pool = pool.get_ref().clone();
+    let list = run_blocking(move || {
+        AlertHistoryRepository::new(pool).get_history(monitor_id, before_id, size)
+    })
+    .await?;
     // 满页时以最后一条 id 作为下一页游标；不足一页说明已到末页
     let next_cursor = if (list.len() as i64) == size {
         list.last().map(|r| r.id)

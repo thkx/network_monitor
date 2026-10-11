@@ -36,50 +36,59 @@ impl Monitor for FtpMonitor {
         };
         let start = Instant::now();
         let mut result = FtpMonitorResult::default();
-        // 连接与每步读取的超时对齐 config.timeout（毫秒；下限1秒防配置0立即超时）
-        // 此前硬编码连接5秒/单次读3秒，配置的超时对FTP不生效
-        let step_timeout = Duration::from_millis(config.timeout.max(1000));
-        let connect_res =
-            tokio::time::timeout(step_timeout, TcpStream::connect((host.as_str(), port))).await;
-        if let Ok(Ok(mut stream)) = connect_res {
-            result.connected = true;
-            let mut buf = Vec::with_capacity(256);
-            // 步骤1：欢迎横幅（合法FTP服务以2xx响应码开始）
-            if let Ok(code) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await {
-                result.last_code = Some(code);
-                result.banner = Some(String::from_utf8_lossy(&buf).trim().to_string());
-                // 横幅字节清空：read_ftp_reply对累积缓冲解析，残留横幅会被误当下一步响应
-                buf.clear();
-                if code == 220 {
-                    // 步骤2：USER anonymous
-                    if send_cmd(&mut stream, "USER anonymous").await.is_ok()
-                        && let Ok(c1) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await
-                    {
-                        result.last_code = Some(c1);
-                        result.handshake_ok = true;
-                        match c1 {
-                            // 免密直接登录成功
-                            230 => result.logged_in = true,
-                            // 需要密码：步骤3 PASS（密码用占位邮箱，探测不假设真实凭证）
-                            331 => {
-                                buf.clear();
-                                if send_cmd(&mut stream, "PASS ftp-monitor@example.com")
-                                    .await
-                                    .is_ok()
-                                    && let Ok(c2) =
-                                        read_ftp_reply(&mut stream, &mut buf, step_timeout).await
-                                {
-                                    result.last_code = Some(c2);
-                                    result.logged_in = (200..=299).contains(&c2);
+        // 整次探测的总上界：此前每步独立 step_timeout，最坏约 4×timeout（连接+横幅+USER+PASS）。
+        // 改为用一个外层 timeout 包裹"连接+整个握手"，使单次探测的总耗时有硬上界，
+        // 与 tcp/udp 的整体上界语义一致。各步读取仍以总预算为单步上限（真正的边界由外层 timeout 把关）。
+        // （毫秒；下限1秒防配置0立即超时）
+        let total_deadline = Duration::from_millis(config.timeout.max(1000));
+        let step_timeout = total_deadline;
+        // 握手整体作为一个 future，由外层 timeout 统一限时；内部按原语义逐步推进并写入 result
+        let handshake = async {
+            let connect_res =
+                tokio::time::timeout(step_timeout, TcpStream::connect((host.as_str(), port))).await;
+            if let Ok(Ok(mut stream)) = connect_res {
+                result.connected = true;
+                let mut buf = Vec::with_capacity(256);
+                // 步骤1：欢迎横幅（合法FTP服务以2xx响应码开始）
+                if let Ok(code) = read_ftp_reply(&mut stream, &mut buf, step_timeout).await {
+                    result.last_code = Some(code);
+                    result.banner = Some(String::from_utf8_lossy(&buf).trim().to_string());
+                    // 横幅字节清空：read_ftp_reply对累积缓冲解析，残留横幅会被误当下一步响应
+                    buf.clear();
+                    if code == 220 {
+                        // 步骤2：USER anonymous
+                        if send_cmd(&mut stream, "USER anonymous").await.is_ok()
+                            && let Ok(c1) =
+                                read_ftp_reply(&mut stream, &mut buf, step_timeout).await
+                        {
+                            result.last_code = Some(c1);
+                            result.handshake_ok = true;
+                            match c1 {
+                                // 免密直接登录成功
+                                230 => result.logged_in = true,
+                                // 需要密码：步骤3 PASS（密码用占位邮箱，探测不假设真实凭证）
+                                331 => {
+                                    buf.clear();
+                                    if send_cmd(&mut stream, "PASS ftp-monitor@example.com")
+                                        .await
+                                        .is_ok()
+                                        && let Ok(c2) =
+                                            read_ftp_reply(&mut stream, &mut buf, step_timeout).await
+                                    {
+                                        result.last_code = Some(c2);
+                                        result.logged_in = (200..=299).contains(&c2);
+                                    }
                                 }
+                                // 其余响应码（如530拒绝匿名）：握手完成，登录失败如实记录
+                                _ => {}
                             }
-                            // 其余响应码（如530拒绝匿名）：握手完成，登录失败如实记录
-                            _ => {}
                         }
                     }
                 }
             }
-        }
+        };
+        // 超时则握手提前中止：已写入 result 的部分如实保留（connected/各步状态）
+        let _ = tokio::time::timeout(total_deadline, handshake).await;
         result.elapsed_ms = start.elapsed().as_millis();
         (true, CheckResultDetail::Ftp(result))
     }

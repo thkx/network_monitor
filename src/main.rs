@@ -324,6 +324,10 @@ async fn consume_results(
                 let Some(message) = message else {
                     // 所有发送端关闭（优雅关停路径）：清空余量后结束
                     flush_batch_async(&result_service, &mut buffer).await;
+                    // CSV 改为批量/定时刷盘后，关停前显式刷掉内存缓冲，避免丢最后一批记录
+                    if let Err(e) = logger.flush() {
+                        tracing::error!("CSV日志刷盘失败: {}", e);
+                    }
                     break;
                 };
                 // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
@@ -351,6 +355,10 @@ async fn consume_results(
             }
             _ = flush_tick.tick() => {
                 flush_batch_async(&result_service, &mut buffer).await;
+                // CSV 定时刷盘：与攒批落库同一节奏（秒级），把内存缓冲落盘
+                if let Err(e) = logger.flush() {
+                    tracing::error!("CSV日志刷盘失败: {}", e);
+                }
             }
         }
     }
