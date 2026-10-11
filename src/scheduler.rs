@@ -41,26 +41,31 @@ impl Scheduler {
         self.tx = Some(tx);
     }
 
-    // 全量重建所有监控任务：先停止旧任务，再从数据库加载启用中的配置重新调度
+    // 全量重建所有监控任务（ADR-0007 A3：build-then-swap 原子热更新）。
+    // 先读库拿到新配置，确认有可用替代后，才停旧任务、起新任务。
+    // 旧实现先 abort 全部再读库、读失败即 return——一次瞬时 DB 抖动就会把全量监控清零
+    // 且不自愈（破坏性操作先于"替代可用"确认）。现在读库失败则保留现有任务原样运行。
     pub fn reload_all(&mut self, service: &MonitorService) {
-        for (_id, handle) in self.tasks.drain() {
-            handle.abort();
-        }
         // clone一份sender，避免持有self的不可变借用阻塞后续spawn_one的可变借用
         let Some(tx) = self.tx.clone() else {
             return;
         };
+        // 第一步：先读库（不破坏任何现有任务）
         let rows = match service.get_all_enabled() {
             Ok(rows) => rows,
             Err(e) => {
-                tracing::error!("调度器加载监控配置失败: {}", e);
+                tracing::error!("调度器加载监控配置失败，保留现有任务不变: {}", e);
                 return;
             }
         };
+        // 第二步：确认已拿到新配置后，才停旧任务、按新配置起任务（两步间无 await，不产生双份运行窗口）
+        for (_id, handle) in self.tasks.drain() {
+            handle.abort();
+        }
         for row in rows {
             self.spawn_one(row, tx.clone());
         }
-        tracing::info!("调度器已启动 {} 个定时监控任务", self.tasks.len());
+        tracing::info!("调度器已重建 {} 个定时监控任务", self.tasks.len());
     }
 
     // 停止单个监控任务（预留按 id 停止的能力，当前热更新统一走 reload_all）
@@ -224,5 +229,36 @@ mod tests {
         // 关停：任务清空且发送端释放（消费者的recv将最终返回None）
         scheduler.shutdown();
         assert_eq!(scheduler.active_task_count(), 0, "关停后任务应清空");
+    }
+
+    // A3 回归：reload 时若读库失败，应保留现有任务不变（build-then-swap），不清零
+    #[tokio::test]
+    async fn reload_preserves_tasks_when_db_read_fails() {
+        use diesel::connection::SimpleConnection;
+        let dir = tempfile::tempdir().expect("临时目录创建失败");
+        let pool = Arc::new(test_pool(dir.path()));
+        let service = MonitorService::new(MonitorRepository::new(pool.clone()));
+        insert_cpu(&pool, "t-sched-keep-1");
+        insert_cpu(&pool, "t-sched-keep-2");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let mut scheduler = Scheduler::new(pool.clone(), 5);
+        scheduler.set_sender(tx);
+        scheduler.reload_all(&service);
+        assert_eq!(scheduler.active_task_count(), 2, "初次加载应起2个任务");
+
+        // 制造读库失败：删表后 get_all_enabled 必然报错（无 check_result 行，不触发级联）
+        {
+            let mut conn = crate::database::pool::get_connection(&pool).expect("取连接失败");
+            conn.batch_execute("DROP TABLE monitor_config")
+                .expect("删表失败");
+        }
+        scheduler.reload_all(&service);
+        assert_eq!(
+            scheduler.active_task_count(),
+            2,
+            "读库失败时应保留现有任务不变,而非清零"
+        );
+        scheduler.shutdown();
     }
 }

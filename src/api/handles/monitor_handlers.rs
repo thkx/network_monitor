@@ -299,7 +299,7 @@ pub async fn update_monitor(
 pub async fn delete_monitor(
     monitor_service: web::Data<MonitorService>,
     scheduler: web::Data<Arc<Mutex<Scheduler>>>,
-    metrics: web::Data<Arc<Mutex<MetricsRegistry>>>,
+    metrics: web::Data<Arc<MetricsRegistry>>,
     path: web::Path<i32>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
@@ -313,11 +313,8 @@ pub async fn delete_monitor(
         )));
     }
     // 清理该监控的内存指标：删除是id永久消失的路径，否则/metrics会持续输出陈旧entry
-    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
-    metrics
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(id);
+    // MetricsRegistry 内部自带带中毒恢复的 Mutex（ADR-0007 D1：去掉冗余的外层 Arc<Mutex>）
+    metrics.remove(id);
     // 热更新：重建监控任务，被删除的监控随之停止
     reload_scheduler(&scheduler, &monitor_service).await;
     Ok(HttpResponse::Ok().json(DefaultResponseObj {
@@ -365,7 +362,7 @@ pub async fn run_monitor_once(
     path: web::Path<i32>,
     monitor_service: web::Data<MonitorService>,
     result_service: web::Data<ResultService>,
-    metrics: web::Data<Arc<Mutex<MetricsRegistry>>>,
+    metrics: web::Data<Arc<MetricsRegistry>>,
     default_interval: web::Data<u64>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
@@ -413,21 +410,18 @@ pub async fn run_monitor_once(
         }
     };
     // 指标与持久化与主消费循环同源，手动执行不影响数据一致性
-    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
+    // MetricsRegistry 内部自带带中毒恢复的 Mutex（ADR-0007 D1：去掉冗余的外层 Arc<Mutex>）
     {
         let (status, response_time, _code) = result.log_fields();
-        metrics
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .record(
-                &ResultRoute {
-                    name: name.clone(),
-                    monitor_id: Some(id),
-                },
-                &result.monitor_type.to_string(),
-                status,
-                u64::try_from(response_time).unwrap_or(u64::MAX),
-            );
+        metrics.record(
+            &ResultRoute {
+                name: name.clone(),
+                monitor_id: Some(id),
+            },
+            &result.monitor_type.to_string(),
+            status,
+            u64::try_from(response_time).unwrap_or(u64::MAX),
+        );
     }
     // 响应字段先于落库取出：持久化会把 result move 进阻塞闭包
     let (status, response_time, status_code) = result.log_fields();

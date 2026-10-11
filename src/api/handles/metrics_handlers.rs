@@ -1,5 +1,5 @@
 // /metrics 端点处理器：输出Prometheus文本格式指标，供Prometheus/Grafana等抓取
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use actix_web::web;
 
@@ -10,7 +10,7 @@ use crate::metrics::MetricsRegistry;
 // GET /metrics：内存指标注册表渲染 + alert_state表快照合并
 // 查库失败时省略alerting家族而不是报500：指标端点应尽力输出
 pub async fn get_metrics(
-    registry: web::Data<Arc<Mutex<MetricsRegistry>>>,
+    registry: web::Data<Arc<MetricsRegistry>>,
     pool: web::Data<Arc<SqlitePool>>,
 ) -> impl actix_web::Responder {
     // 同步 diesel 查询挪阻塞池（ADR-0002 A1）；查库/阻塞任何一层失败都降级为
@@ -20,11 +20,8 @@ pub async fn get_metrics(
         .await
         .ok()
         .and_then(|r| r.ok());
-    // 锁中毒时从毒化锁恢复而非级联 panic（ADR-0006 E2）
-    let body = registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .render(alerting.as_deref());
+    // MetricsRegistry 内部自带带中毒恢复的 Mutex（ADR-0007 D1：去掉冗余的外层 Arc<Mutex>）
+    let body = registry.render(alerting.as_deref());
     actix_web::HttpResponse::Ok()
         .content_type("text/plain; version=0.0.4; charset=utf-8")
         .body(body)

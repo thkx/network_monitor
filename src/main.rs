@@ -179,8 +179,10 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
         }
     });
 
-    // 指标注册表：消费者写入、/metrics端点读取（Server模式专属）
-    let metrics_registry = Arc::new(Mutex::new(MetricsRegistry::new()));
+    // 指标注册表：消费者写入、/metrics端点读取（Server模式专属）。
+    // MetricsRegistry 内部已自带 Mutex 自同步，故此处直接用 Arc 共享、不再外包一层
+    // Arc<Mutex<>>（ADR-0007 D1：双重加锁冗余，且外层 .expect 中毒会级联 panic）
+    let metrics_registry = Arc::new(MetricsRegistry::new());
 
     // 3. 后台任务持续消费监控结果：写CSV日志 + 持久化到数据库 + 更新Prometheus指标
     // （告警检查已下沉到各监控任务）
@@ -216,9 +218,12 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             tick.tick().await;
+            // 后台清扫任务不得因锁中毒 panic（ADR-0007 A6）：某个 handler 持 session 锁时
+            // panic 会毒化此锁，若这里 .expect 则清扫任务连锁死亡、会话表再不回收。
+            // 改为从毒化锁恢复（与 handler 侧 ADR-0006 E2 的处理一致）
             session_store_for_sweep
                 .lock()
-                .expect("session锁中毒")
+                .unwrap_or_else(|e| e.into_inner())
                 .sweep();
         }
     });
@@ -311,7 +316,7 @@ const BATCH_FLUSH_MILLIS: u64 = 1000;
 async fn consume_results(
     result_service: ResultService,
     mut rx: mpsc::Receiver<MonitorResultMessage>,
-    metrics: Arc<Mutex<MetricsRegistry>>,
+    metrics: Arc<MetricsRegistry>,
 ) {
     let logger = CsvLogger::new(&csv_log_path());
     let mut buffer: Vec<MonitorResultMessage> = Vec::with_capacity(BATCH_MAX_ITEMS);
@@ -331,18 +336,17 @@ async fn consume_results(
                     break;
                 };
                 // Prometheus指标更新（Once/Monitor模式无monitor_id时自动跳过）
+                // MetricsRegistry 内部自带带中毒恢复的 Mutex，直接调用；不再经外层
+                // Arc<Mutex> 的 .expect（ADR-0007 A6/D1：后台任务不得因锁中毒级联 panic）
                 {
                     let (status, response_time, _code) = message.result.log_fields();
                     let response_time_ms = u64::try_from(response_time).unwrap_or(u64::MAX);
-                    metrics
-                        .lock()
-                        .expect("metrics锁中毒")
-                        .record(
-                            &message.route,
-                            &message.result.monitor_type.to_string(),
-                            status,
-                            response_time_ms,
-                        );
+                    metrics.record(
+                        &message.route,
+                        &message.result.monitor_type.to_string(),
+                        status,
+                        response_time_ms,
+                    );
                 }
                 log_result(&logger, &message.route.name, &message.result);
                 // 数据库持久化走攒批；无主键的结果（Once/Monitor模式）本就不入库
@@ -431,6 +435,12 @@ fn import_monitor_list(
 ) {
     for entry in monitor_list {
         let name = display_name(entry);
+        // 启动导入也走与 API 创建相同的校验（ADR-0007 D5）：此前仅 /api 路径校验，
+        // JSON 文件可绕过校验把脏配置直接写库、运行期才暴露。校验失败则跳过该条并告警。
+        if let Err(e) = crate::api::handles::validation::validate_config(entry) {
+            tracing::error!("监控配置 {} 校验失败，跳过导入: {}", name, e);
+            continue;
+        }
         match monitor_service.find_by_name(&name) {
             Ok(Some(_)) => continue, // 已存在，跳过
             Ok(None) => {

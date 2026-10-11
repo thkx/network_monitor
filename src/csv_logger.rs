@@ -1,8 +1,9 @@
 // 定义一个csv_logger.rs模块
-use chrono::Local;
+use chrono::{Local, NaiveDate};
 use prettytable::csv::Writer;
 use std::error::Error;
 use std::fs::{File, OpenOptions};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,11 @@ struct Inner {
 // 按日滚动：实际写入的是 <base>-YYYY-MM-DD.<ext> 派生文件；句柄常驻，仅跨天时重开。
 pub struct CsvLogger {
     base_path: String,
+    // CSV 保留天数（ADR-0007 D6）：与数据库保留策略对称，防止按日滚动的 CSV 文件
+    // 无限堆积撑满磁盘、连带打死权威数据库。None=不清理（保留全部）。
+    // 由环境变量 CSV_RETENTION_DAYS 配置：缺省复用 RESULT_RETENTION_DAYS（默认30），
+    // 显式设为 0 或负数表示永久保留（关闭清理）。
+    retention_days: Option<i64>,
     inner: Mutex<Inner>,
 }
 
@@ -76,18 +82,27 @@ fn open_dated(base: &str, date: &str) -> Result<Writer<File>, Box<dyn Error>> {
 
 impl CsvLogger {
     pub fn new(base_path: &str) -> Self {
+        Self::with_retention(base_path, retention_days_from_env())
+    }
+
+    // 带显式保留天数的构造（供测试直接注入；生产走 new 读环境变量）
+    pub fn with_retention(base_path: &str, retention_days: Option<i64>) -> Self {
         let date = Local::now().format("%Y-%m-%d").to_string();
         // 启动即建立常驻句柄；打开失败与此前 unwrap 语义一致地视为启动错误
         let writer = open_dated(base_path, &date).expect("CSV日志初始化失败");
-        CsvLogger {
+        let logger = CsvLogger {
             base_path: base_path.to_string(),
+            retention_days,
             inner: Mutex::new(Inner {
-                date,
+                date: date.clone(),
                 writer,
                 pending: 0,
                 last_flush: Instant::now(),
             }),
-        }
+        };
+        // 启动时清理一次过期的按日 CSV 文件（当天文件不受影响）
+        logger.cleanup_old_files(&date);
+        logger
     }
 
     // 读写日志内容：使用常驻句柄追加一条记录，跨天时先滚动到新文件
@@ -102,6 +117,7 @@ impl CsvLogger {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut rolled_over = false;
         if inner.date != date {
             // 跨天滚动：切到新日期文件前，先刷掉旧句柄缓冲中残留的记录，避免丢数据；
             // 旧 writer 被替换后其文件句柄随之关闭
@@ -110,6 +126,7 @@ impl CsvLogger {
             inner.date = date.to_string();
             inner.pending = 0;
             inner.last_flush = Instant::now();
+            rolled_over = true;
         }
         let code = result
             .status_code
@@ -134,6 +151,12 @@ impl CsvLogger {
             inner.pending = 0;
             inner.last_flush = Instant::now();
         }
+        drop(inner);
+        // 跨天滚动后顺带清理过期的旧日 CSV 文件（ADR-0007 D6），避免无限堆积；
+        // 放在释放写锁之后做，不阻塞写路径
+        if rolled_over {
+            self.cleanup_old_files(date);
+        }
         Ok(())
     }
 
@@ -149,6 +172,74 @@ impl CsvLogger {
         inner.last_flush = Instant::now();
         Ok(())
     }
+
+    // 清理过期的按日 CSV 文件（ADR-0007 D6）：扫描基础路径所在目录，删除文件名形如
+    // <stem>-YYYY-MM-DD<ext> 且日期早于 (today - retention_days) 的文件。
+    // retention_days 为 None 或 <=0 时不清理；当天文件因日期不早于截止永不被删。
+    // 删除失败仅记录 warn，不影响日志写入主流程。
+    fn cleanup_old_files(&self, today: &str) {
+        let Some(days) = self.retention_days.filter(|d| *d > 0) else {
+            return;
+        };
+        let Ok(today_date) = NaiveDate::parse_from_str(today, "%Y-%m-%d") else {
+            return;
+        };
+        let cutoff = today_date - chrono::Duration::days(days);
+        // 目录与"文件名前后缀"：用 dated_path 的插入规则推导，避免误删同目录其它文件
+        let base = Path::new(&self.base_path);
+        let dir = base.parent().filter(|p| !p.as_os_str().is_empty());
+        let dir = dir.unwrap_or_else(|| Path::new("."));
+        let Some(file_base) = base.file_name().and_then(|s| s.to_str()) else {
+            return;
+        };
+        // 以标记位切出日期前后缀，如 "monitor_log-" / ".csv"
+        const MARKER: &str = "\u{0}DATE\u{0}";
+        let marked = dated_path(file_base, MARKER);
+        let Some((name_prefix, name_suffix)) = marked.split_once(MARKER) else {
+            return;
+        };
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("CSV 清理读取目录失败: {}", e);
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let Some(fname) = fname.to_str() else {
+                continue;
+            };
+            // 必须精确匹配 "<prefix>DATE<suffix>" 结构，中间段恰为合法日期
+            let Some(mid) = fname
+                .strip_prefix(name_prefix)
+                .and_then(|s| s.strip_suffix(name_suffix))
+            else {
+                continue;
+            };
+            let Ok(file_date) = NaiveDate::parse_from_str(mid, "%Y-%m-%d") else {
+                continue;
+            };
+            if file_date < cutoff {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => tracing::info!("已清理过期 CSV 日志文件: {}", fname),
+                    Err(e) => tracing::warn!("清理过期 CSV 文件 {} 失败: {}", fname, e),
+                }
+            }
+        }
+    }
+}
+
+// 从环境变量解析 CSV 保留天数（ADR-0007 D6）：
+// CSV_RETENTION_DAYS 优先；缺省复用 RESULT_RETENTION_DAYS（与数据库保留对称），
+// 两者都缺省则默认 30 天；显式 <=0 表示永久保留（关闭清理，返回 None）
+fn retention_days_from_env() -> Option<i64> {
+    let raw = std::env::var("CSV_RETENTION_DAYS")
+        .or_else(|_| std::env::var("RESULT_RETENTION_DAYS"))
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(30);
+    if raw > 0 { Some(raw) } else { None }
 }
 
 impl Drop for CsvLogger {
@@ -211,5 +302,48 @@ mod tests {
         assert!(c1.contains(",a,"), "首日文件应含首日记录");
         assert!(!c1.contains(",b,"), "首日文件不应含次日记录");
         assert!(c2.contains(",b,"), "次日文件应含次日记录");
+    }
+
+    // D6：启动清理删除早于保留窗口的按日 CSV，保留窗口内文件与非匹配文件不受影响
+    #[test]
+    fn cleanup_removes_files_older_than_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("monitor_log.csv");
+        let base_str = base.to_str().unwrap();
+        let today = chrono::Local::now().date_naive();
+        let old = today - chrono::Duration::days(40);
+        let recent = today - chrono::Duration::days(3);
+        let old_f = dir
+            .path()
+            .join(format!("monitor_log-{}.csv", old.format("%Y-%m-%d")));
+        let recent_f = dir
+            .path()
+            .join(format!("monitor_log-{}.csv", recent.format("%Y-%m-%d")));
+        let unrelated = dir.path().join("other.csv");
+        std::fs::write(&old_f, "x").unwrap();
+        std::fs::write(&recent_f, "x").unwrap();
+        std::fs::write(&unrelated, "x").unwrap();
+
+        // 保留30天：构造时启动清理
+        let _logger = CsvLogger::with_retention(base_str, Some(30));
+        assert!(!old_f.exists(), "40天前文件应被清理");
+        assert!(recent_f.exists(), "3天内文件应保留");
+        assert!(unrelated.exists(), "不匹配命名的文件不应被动");
+    }
+
+    // D6：retention 为 None（关闭清理）时，再老的文件也保留
+    #[test]
+    fn cleanup_disabled_keeps_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("monitor_log.csv");
+        let base_str = base.to_str().unwrap();
+        let today = chrono::Local::now().date_naive();
+        let old = today - chrono::Duration::days(400);
+        let old_f = dir
+            .path()
+            .join(format!("monitor_log-{}.csv", old.format("%Y-%m-%d")));
+        std::fs::write(&old_f, "x").unwrap();
+        let _logger = CsvLogger::with_retention(base_str, None);
+        assert!(old_f.exists(), "关闭清理时历史文件应全部保留");
     }
 }

@@ -103,7 +103,7 @@ mod tests {
     use crate::database::services::result_service::ResultService;
     use crate::metrics::MetricsRegistry;
     use actix_web::web;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     // 控制台两个端点的端到端测试：临时库 + 内存App
     // 手动执行选CPU类型监控：无网络依赖，结果稳定可用
@@ -113,7 +113,8 @@ mod tests {
         let pool = Arc::new(test_pool(dir.path()));
         let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
         let result_service = ResultService::new(CheckResultRepository::new(pool.clone()));
-        let metrics = Arc::new(Mutex::new(MetricsRegistry::new()));
+        // D1：MetricsRegistry 直接 Arc 共享（内部自带 Mutex），不再外包 Arc<Mutex>
+        let metrics = Arc::new(MetricsRegistry::new());
 
         let insert = MonitorConfigInsert {
             name: Some("t-cpu".to_string()),
