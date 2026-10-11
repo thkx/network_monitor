@@ -135,7 +135,7 @@ mod tests {
                 .app_data(web::Data::new(result_service.clone()))
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(metrics.clone()))
-                .app_data(web::Data::new(5u64))
+                .app_data(web::Data::new(crate::config::DefaultInterval(5)))
                 .route("/api/status", web::get().to(get_console_status))
                 .route("/api/monitors/{id}/run", web::post().to(run_monitor_once)),
         )

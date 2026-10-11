@@ -81,7 +81,9 @@ fn env_bool(key: &str) -> Option<bool> {
 }
 
 impl AuthConfig {
-    pub fn from_env() -> Self {
+    // bind_addr 由调用方（集中配置 AppConfig，ADR-0008 D3）传入，不再在此二次读 BIND_ADDR，
+    // 保证"实际绑定地址"与"据以推断 cookie Secure 的地址"是同一个值
+    pub fn from_env(bind_addr: &str) -> Self {
         let username = std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
         // 口令摘要来源优先级：
         //   1) ADMIN_PASSWORD_HASH（推荐）：预先生成的 argon2 PHC 字符串，明文不进环境
@@ -103,9 +105,9 @@ impl AuthConfig {
         let enabled = password_hash.is_some();
         // 生产默认 Secure（ADR-0006 E7）：显式配置 COOKIE_SECURE 时以其为准；
         // 未配置时按绑定地址推断——非本机绑定（容器/公网）默认开启 Secure，
-        // 本机调试（127.0.0.1）默认关闭（浏览器拒绝在 http 上发送 Secure cookie）
-        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let cookie_secure = env_bool("COOKIE_SECURE").unwrap_or_else(|| !is_local_bind(&bind_addr));
+        // 本机调试（127.0.0.1）默认关闭（浏览器拒绝在 http 上发送 Secure cookie）。
+        // bind_addr 由调用方传入（集中配置，ADR-0008 D3），与实际绑定地址同源
+        let cookie_secure = env_bool("COOKIE_SECURE").unwrap_or_else(|| !is_local_bind(bind_addr));
         let trust_proxy = env_bool("TRUST_PROXY").unwrap_or(false);
         AuthConfig {
             username,

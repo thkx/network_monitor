@@ -40,6 +40,10 @@ use database::services::result_service::ResultService;
 mod args;
 use args::{Args, Commands};
 
+// 集中运行配置（ADR-0008 D3/D4）：env 单一事实来源 + default_interval DI newtype
+mod config;
+use config::{AppConfig, DefaultInterval};
+
 // 监控引擎模块（基于策略模式+工厂模式的不同类型监控系统）
 mod monitor;
 use domain::{CheckResult, CheckResultDetail, MonitorConfig};
@@ -155,15 +159,16 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
     let monitor_service = MonitorService::new(MonitorRepository::new(pool.clone()));
     let result_service = ResultService::new(CheckResultRepository::new(pool.clone()));
 
+    // 集中读取运行配置（ADR-0008 D3）：BIND_ADDR / CSV_PATH / RESULT_RETENTION_DAYS 一次性读取，
+    // 再分发给各装配点（绑定、CSV、auth 的 Secure 推断、保留清理），消除多处重复读取的漂移
+    let app_config = AppConfig::from_env();
+
     // 2. 将 monitor_list.json 中的配置导入数据库（按名称去重，幂等）
     import_monitor_list(&monitor_service, &monitor_list, default_interval);
 
     // 2.5 数据保留策略：启动时清理一次过期监控结果，此后每24小时重复
-    // 保留天数通过环境变量 RESULT_RETENTION_DAYS 配置（.env），默认30天
-    let retention_days = std::env::var("RESULT_RETENTION_DAYS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(30);
+    // 保留天数来自集中配置（RESULT_RETENTION_DAYS，默认30天）
+    let retention_days = app_config.result_retention_days;
     let result_service_for_cleanup = result_service.clone();
     tokio::spawn(async move {
         loop {
@@ -193,10 +198,12 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
     let (tx, rx) = mpsc::channel::<MonitorResultMessage>(100);
     let result_service_for_loop = result_service.clone();
     let metrics_for_loop = metrics_registry.clone();
+    let csv_path_for_loop = app_config.csv_path.clone();
     let consumer_handle = tokio::spawn(consume_results(
         result_service_for_loop,
         rx,
         metrics_for_loop,
+        csv_path_for_loop,
     ));
 
     // 4. 调度器加载启用配置并启动定时监控；API 增删改配置后可整体重建实现热更新
@@ -206,8 +213,10 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
     let scheduler = web::Data::new(Arc::new(Mutex::new(scheduler)));
 
     // 5. 启动Web API服务
-    // 认证：ADMIN_PASSWORD配置时启用会话认证，未配置时开放并明确WARN
-    let auth_config = Arc::new(AuthConfig::from_env());
+    // 认证：ADMIN_PASSWORD配置时启用会话认证，未配置时开放并明确WARN。
+    // bind_addr 来自集中配置（ADR-0008 D3），同一个值既用于绑定，也供 auth 推断 cookie Secure，
+    // 不再各自读 BIND_ADDR
+    let auth_config = Arc::new(AuthConfig::from_env(&app_config.bind_addr));
     if auth_config.enabled {
         tracing::info!("API认证已启用 (user: {})", auth_config.username);
     } else {
@@ -232,8 +241,8 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
     });
     let metrics_for_app = metrics_registry.clone();
     let pool_for_app = pool.clone();
-    // 监听地址：默认127.0.0.1仅本机可访问；容器/局域网部署时设BIND_ADDR=0.0.0.0
-    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
+    // 监听地址来自集中配置（ADR-0008 D3）：默认127.0.0.1仅本机可访问；容器/局域网部署设BIND_ADDR=0.0.0.0
+    let bind_addr = app_config.bind_addr.clone();
     // 先绑定并转成Server future：ServerHandle从Server获取（actix-web 4中HttpServer本身没有handle()）
     // 关停段持有独立的Data克隆：HttpServer闭包move会接管scheduler本体
     let scheduler_for_shutdown = scheduler.clone();
@@ -245,7 +254,8 @@ async fn run_server(port: u16, default_interval: u64, monitor_list: Vec<MonitorD
             .app_data(web::Data::new(pool_for_app.clone()))
             // scheduler已是Data<Arc<Mutex<Scheduler>>>，直接注册；再包一层会导致handler提取类型不匹配(500)
             .app_data(scheduler.clone())
-            .app_data(web::Data::new(default_interval))
+            // default_interval 以 DI newtype 注入（ADR-0008 D4），避免裸 u64 作键的错配
+            .app_data(web::Data::new(DefaultInterval(default_interval)))
             .app_data(web::Data::new(session_store.clone()))
             .app_data(web::Data::new(auth_config.clone()))
             .wrap(Auth::new(session_store.clone(), auth_config.clone()))
@@ -326,8 +336,9 @@ async fn consume_results(
     result_service: ResultService,
     mut rx: mpsc::Receiver<MonitorResultMessage>,
     metrics: Arc<MetricsRegistry>,
+    csv_path: String,
 ) {
-    let logger = CsvLogger::new(&csv_log_path());
+    let logger = CsvLogger::new(&csv_path);
     let mut buffer: Vec<MonitorResultMessage> = Vec::with_capacity(BATCH_MAX_ITEMS);
     let mut flush_tick =
         tokio::time::interval(std::time::Duration::from_millis(BATCH_FLUSH_MILLIS));

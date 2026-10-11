@@ -4,6 +4,7 @@ use actix_web::{HttpResponse, web};
 use std::sync::{Arc, Mutex};
 
 use crate::async_monitor::{AsyncMonitor, ResultRoute};
+use crate::config::DefaultInterval;
 use crate::database::models::{MonitorConfigInsert, MonitorConfigUpdate};
 use crate::database::services::build_monitor_insert;
 use crate::database::services::monitor_service::MonitorService;
@@ -158,13 +159,12 @@ async fn reload_scheduler(
 pub async fn create_monitor(
     monitor_service: web::Data<MonitorService>,
     scheduler: web::Data<Arc<Mutex<Scheduler>>>, // 配置变更后重建监控任务（热更新）
-    default_interval: web::Data<u64>,            // interval未配置时的缺省间隔（与调度器同源）
+    default_interval: web::Data<DefaultInterval>, // interval未配置时的缺省间隔（与调度器同源）
     body: web::Json<MonitorDefinition>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let entry = body.into_inner();
     super::validation::validate_config(&entry)?;
-    let insert: MonitorConfigInsert =
-        build_monitor_insert(&entry, Arc::unwrap_or_clone(default_interval.into_inner()));
+    let insert: MonitorConfigInsert = build_monitor_insert(&entry, default_interval.0);
     // 同步 diesel 写入挪阻塞池（ADR-0002 A1）；此处保留原始 diesel::Error 以识别
     // 唯一约束冲突（映射 409），故不走 run_blocking（它会把错误脱敏吞掉类型）
     let svc = monitor_service.get_ref().clone();
@@ -212,7 +212,7 @@ pub async fn create_monitor(
 pub async fn update_monitor(
     monitor_service: web::Data<MonitorService>,
     scheduler: web::Data<Arc<Mutex<Scheduler>>>,
-    default_interval: web::Data<u64>, // interval未配置时的缺省间隔（与调度器同源）
+    default_interval: web::Data<DefaultInterval>, // interval未配置时的缺省间隔（与调度器同源）
     path: web::Path<i32>,
     body: web::Json<MonitorDefinition>,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -234,12 +234,7 @@ pub async fn update_monitor(
         target: Some(target),
         method,
         monitor_type: Some(entry.monitor_type.to_string()),
-        interval_ms: Some(
-            (entry
-                .interval
-                .unwrap_or(Arc::unwrap_or_clone(default_interval.into_inner()))
-                * 1000) as i32,
-        ),
+        interval_ms: Some((entry.interval.unwrap_or(default_interval.0) * 1000) as i32),
         timeout_ms: Some(entry.timeout.unwrap_or(5000) as i32),
         config_json: serde_json::to_string(&entry).ok(),
         enabled: None, // 更新时保持启用状态不变
@@ -363,7 +358,7 @@ pub async fn run_monitor_once(
     monitor_service: web::Data<MonitorService>,
     result_service: web::Data<ResultService>,
     metrics: web::Data<Arc<MetricsRegistry>>,
-    default_interval: web::Data<u64>,
+    default_interval: web::Data<DefaultInterval>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let id = path.into_inner();
     // 同步 diesel 查询挪阻塞池（ADR-0002 A1），错误脱敏为通用 500（E1）
@@ -385,7 +380,7 @@ pub async fn run_monitor_once(
         .clone()
         .unwrap_or_else(|| crate::domain::display_name(&entry));
     // 未配置interval时使用--interval默认值（与定时调度同源）
-    let interval_default = Arc::unwrap_or_clone(default_interval.into_inner());
+    let interval_default = default_interval.0;
     let config = crate::domain::MonitorConfig::from_entry(&entry, interval_default);
     let monitor = MonitorFactory::create_monitor(config.monitor_type);
     // 单次执行：复用Once模式的执行封装，结果完整返回给前端
@@ -471,7 +466,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(web::Data::new(monitor_service.clone()))
                 .app_data(web::Data::new(scheduler.clone()))
-                .app_data(web::Data::new(5u64))
+                .app_data(web::Data::new(crate::config::DefaultInterval(5)))
                 .route("/api/monitors", web::post().to(create_monitor))
                 .route("/api/monitors", web::get().to(get_all_monitors))
                 .route("/api/monitors/tags", web::get().to(get_monitor_tags)),
@@ -532,7 +527,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(web::Data::new(monitor_service.clone()))
                 .app_data(web::Data::new(scheduler.clone()))
-                .app_data(web::Data::new(5u64)) // create_monitor提取缺省间隔
+                .app_data(web::Data::new(crate::config::DefaultInterval(5))) // create_monitor提取缺省间隔
                 .route("/api/monitors", web::post().to(create_monitor)),
         )
         .await;
@@ -570,7 +565,7 @@ mod tests {
             actix_web::App::new()
                 .app_data(web::Data::new(monitor_service.clone()))
                 .app_data(web::Data::new(scheduler.clone()))
-                .app_data(web::Data::new(7u64)) // 服务端缺省间隔=7秒
+                .app_data(web::Data::new(crate::config::DefaultInterval(7))) // 服务端缺省间隔=7秒
                 .route("/api/monitors", web::post().to(create_monitor))
                 .route("/api/monitors/{id}", web::put().to(update_monitor)),
         )
